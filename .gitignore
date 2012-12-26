@@ -4,6 +4,7 @@ doc/build/*
 dist
 ChangeLog
 .coverage
+gluster_swift_ufo.egg-info
 swift.egg-info
 .DS_Store
 .tox

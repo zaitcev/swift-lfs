@@ -34,7 +34,7 @@ setup(
     author='OpenStack, LLC.',
     author_email='openstack-admins@lists.launchpad.net',
     url='https://launchpad.net/swift',
-    packages=find_packages(exclude=['test', 'bin']),
+    packages=find_packages(exclude=['gluster', 'test', 'bin']),
     test_suite='nose.collector',
     classifiers=[
         'Development Status :: 4 - Beta',

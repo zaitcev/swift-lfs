@@ -38,11 +38,15 @@ from swift.common.utils import cache_from_env, get_logger, \
 from swift.common.constraints import check_utf8
 from swift.proxy.controllers import AccountController, ObjectController, \
     ContainerController, Controller
+from swift.proxy.controllers.lfs import (AccControllerPosix,
+    ContControllerPosix, AccControllerGluster, ContControllerGluster)
 from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPForbidden, \
     HTTPMethodNotAllowed, HTTPNotFound, HTTPPreconditionFailed, \
     HTTPRequestEntityTooLarge, HTTPRequestTimeout, HTTPServerError, \
     HTTPServiceUnavailable, HTTPClientDisconnect, status_map, Request, Response
 
+# P3
+import traceback
 
 class Application(object):
     """WSGI application for the proxy server."""
@@ -110,6 +114,9 @@ class Application(object):
             a.strip()
             for a in conf.get('cors_allow_origin', '').split(',')
             if a.strip()]
+        self.lfs_mode = conf.get('lfs_mode', 'swift')
+        # Not defaulting to /var/lib/swift for a better bug detection.
+        self.lfs_root = conf.get('lfs_root', None)
 
     def get_controller(self, path):
         """
@@ -125,12 +132,21 @@ class Application(object):
                  account_name=account,
                  container_name=container,
                  object_name=obj)
+        if self.lfs_mode == 'posix':
+            ac = AccControllerPosix
+            cc = ContControllerPosix
+        elif self.lfs_mode == 'gluster':
+            ac = AccControllerGluster
+            cc = ContControllerGluster
+        else:
+            ac = AccountController
+            cc = ContainerController
         if obj and container and account:
             return ObjectController, d
         elif container and account:
-            return ContainerController, d
+            return cc, d
         elif account and not container and not obj:
-            return AccountController, d
+            return ac, d
         return None, d
 
     def __call__(self, env, start_response):
@@ -150,6 +166,12 @@ class Application(object):
             err = HTTPPreconditionFailed(request=req, body='Invalid UTF8')
             return err(env, start_response)
         except (Exception, Timeout):
+            # P3
+            fp = open("/tmp/dump","a")
+            fp.write("====== status 500 in __call__\n")
+            fp.write(traceback.format_exc())
+            fp.write("====== done\n")
+            fp.close()
             start_response('500 Server Error',
                            [('Content-Type', 'text/plain')])
             return ['Internal server error.\n']
@@ -240,6 +262,12 @@ class Application(object):
             return handler(req)
         except (Exception, Timeout):
             self.logger.exception(_('ERROR Unhandled exception in request'))
+            # P3
+            fp = open("/tmp/dump","a")
+            fp.write("====== status 500 in handle_request\n")
+            fp.write(traceback.format_exc())
+            fp.write("====== done\n")
+            fp.close()
             return HTTPServerError(request=req)
 
 

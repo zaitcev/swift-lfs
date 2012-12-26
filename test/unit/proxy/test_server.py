@@ -22,7 +22,6 @@ import sys
 import unittest
 import urlparse
 import signal
-from ConfigParser import ConfigParser
 from contextlib import contextmanager
 from cStringIO import StringIO
 from gzip import GzipFile
