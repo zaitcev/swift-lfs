@@ -110,26 +110,40 @@ def _destroyxattr():
     global _xattrs; _xattrs = None
 
 
+class S(object):
+    def __init__(self):
+        self._testdir = None
+        self._test_servers = None
+        self._test_sockets = None
+        self._test_coros = None
+
 def setup():
     _initxattr()
+    global _sg
+    _sg = S()
+    _setup(_sg, 'gluster')
 
-    global _testdir, _test_servers, _test_sockets, _test_coros
-    _testdir = os.path.join(mkdtemp(), 'tmp_test_proxy_server_lfs')
-    conf = {'devices': _testdir, 'swift_dir': _testdir,
+def teardown():
+    _teardown(_sg)
+    _destroyxattr()
+
+def _setup(state, mode):
+    state._testdir = os.path.join(mkdtemp(), 'tmp_test_proxy_server_lfs')
+    conf = {'devices': state._testdir, 'swift_dir': state._testdir,
             'mount_check': 'false', 'allow_versions': 'True',
             'allow_account_management': 'yes',
-            'lfs_mode': 'gluster',
-            'lfs_root': _testdir}
-    mkdirs(_testdir)
-    rmtree(_testdir)
+            'lfs_mode': mode,
+            'lfs_root': state._testdir}
+    mkdirs(state._testdir)
+    rmtree(state._testdir)
     prolis = listen(('localhost', 0))
-    _test_sockets = (prolis,)
+    state._test_sockets = (prolis,)
     prosrv = proxy_server.Application(conf, FakeMemcacheReturnsNone(),
                                       None, FakeRing(), FakeRing(), FakeRing())
-    _test_servers = (prosrv,)
+    state._test_servers = (prosrv,)
     nl = NullLogger()
     prospa = spawn(wsgi.server, prolis, prosrv, nl)
-    _test_coros = (prospa,)
+    state._test_coros = (prospa,)
 
     # Create account
     # XXX Why not create a controller directly and invoke it?
@@ -171,11 +185,10 @@ def setup():
     fp.close()
     assert(headers[:len(exp)] == exp)
 
-def teardown():
-    for server in _test_coros:
+def _teardown(state):
+    for server in state._test_coros:
         server.kill()
-    rmtree(os.path.dirname(_testdir))
-    _destroyxattr()
+    rmtree(os.path.dirname(state._testdir))
 
 
 # XXX Get rid of the Ring eventually
@@ -242,13 +255,14 @@ class FakeMemcacheReturnsNone(FakeMemcache):
         # using the FakeMemcache for container existence checks.
         return None
 
+
 class TestController(unittest.TestCase):
 
     #def setUp(self):
-    #    _initxattr()
+    #    _setup(self)
 
     #def tearDown(self):
-    #    _destroyxattr()
+    #    _teardown(self)
 
     def test_nothing(self):
         print 'nothing'
