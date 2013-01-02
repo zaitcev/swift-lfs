@@ -112,38 +112,28 @@ def _destroyxattr():
 
 class S(object):
     def __init__(self):
-        self._testdir = None
-        self._test_servers = None
-        self._test_sockets = None
-        self._test_coros = None
-
-def setup():
-    _initxattr()
-    global _sg
-    _sg = S()
-    _setup(_sg, 'gluster')
-
-def teardown():
-    _teardown(_sg)
-    _destroyxattr()
+        self.testdir = None
+        self.servers = None
+        self.sockets = None
+        self.coros = None
 
 def _setup(state, mode):
-    state._testdir = os.path.join(mkdtemp(), 'tmp_test_proxy_server_lfs')
-    conf = {'devices': state._testdir, 'swift_dir': state._testdir,
+    state.testdir = os.path.join(mkdtemp(), 'tmp_test_proxy_server_lfs')
+    conf = {'devices': state.testdir, 'swift_dir': state.testdir,
             'mount_check': 'false', 'allow_versions': 'True',
             'allow_account_management': 'yes',
             'lfs_mode': mode,
-            'lfs_root': state._testdir}
-    mkdirs(state._testdir)
-    rmtree(state._testdir)
+            'lfs_root': state.testdir}
+    mkdirs(state.testdir)
+    rmtree(state.testdir)
     prolis = listen(('localhost', 0))
-    state._test_sockets = (prolis,)
+    state.sockets = (prolis,)
     prosrv = proxy_server.Application(conf, FakeMemcacheReturnsNone(),
                                       None, FakeRing(), FakeRing(), FakeRing())
-    state._test_servers = (prosrv,)
+    state.servers = (prosrv,)
     nl = NullLogger()
     prospa = spawn(wsgi.server, prolis, prosrv, nl)
-    state._test_coros = (prospa,)
+    state.coros = (prospa,)
 
     # Create account
     # XXX Why not create a controller directly and invoke it?
@@ -151,13 +141,13 @@ def _setup(state, mode):
     sock = connect_tcp(('localhost', prolis.getsockname()[1]))
     fd = sock.makefile()
     # P3
-    #fd.write('HEAD /v1/a HTTP/1.1\r\nHost: localhost\r\n'
-    #             'Connection: close\r\nContent-Length: 0\r\n\r\n')
-    fd.write('GET /v1/a HTTP/1.1\r\nHost: localhost\r\n'
+    fd.write('HEAD /v1/a HTTP/1.1\r\nHost: localhost\r\n'
                  'Connection: close\r\nContent-Length: 0\r\n\r\n')
+    #fd.write('GET /v1/a HTTP/1.1\r\nHost: localhost\r\n'
+    #             'Connection: close\r\nContent-Length: 0\r\n\r\n')
     fd.flush()
     # P3
-    #headers = readuntil2crlfs(fd)
+    # headers = readuntil2crlfs(fd)
     headers = fd.read()
     exp = 'HTTP/1.1 201'
     # P3
@@ -174,21 +164,28 @@ def _setup(state, mode):
              'Connection: close\r\nX-Auth-Token: t\r\n'
              'Content-Length: 0\r\n\r\n')
     fd.flush()
-    # P3
-    #headers = readuntil2crlfs(fd)
-    headers = fd.read()
+    headers = readuntil2crlfs(fd)
     exp = 'HTTP/1.1 201'
-    # P3
-    fp = open("/tmp/dump","a")
-    print >>fp, "== PUT"
-    print >>fp, headers
-    fp.close()
     assert(headers[:len(exp)] == exp)
 
 def _teardown(state):
-    for server in state._test_coros:
+    for server in state.coros:
         server.kill()
-    rmtree(os.path.dirname(state._testdir))
+    rmtree(os.path.dirname(state.testdir))
+
+
+def setup():
+    _initxattr()
+    global _sg, _sp
+    _sg = S()
+    _setup(_sg, 'gluster')
+    _sp = S()
+    _setup(_sp, 'posix')
+
+def teardown():
+    _teardown(_sg)
+    _teardown(_sp)
+    _destroyxattr()
 
 
 # XXX Get rid of the Ring eventually

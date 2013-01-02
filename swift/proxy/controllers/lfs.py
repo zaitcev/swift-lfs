@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import cPickle as pickle
 import os
 import time
+import xattr
 from urllib import unquote
 
 from swift.common.constraints import (ACCOUNT_LISTING_LIMIT, check_mount,
@@ -37,12 +39,162 @@ from swift.proxy.controllers.base import Controller
 from gluster.swift.common.DiskDir import DiskDir, DiskAccount
 
 
+METADATA_KEY = 'user.swift.metadata'
+STATUS_KEY = 'user.swift.status'
+PICKLE_PROTOCOL = 2
+#MAX_XATTR_SIZE = 65536
+
+# Using the same metadata protocol as the object server normally uses.
+# XXX Gluster has a more elaborate verion with gradual unpicking. Why?
+def read_metadata(path):
+    metadata = ''
+    key = 0
+    try:
+        while True:
+            metadata += xattr.get(path, '%s%s' % (METADATA_KEY, (key or '')))
+            key += 1
+    except IOError:
+        pass
+    return pickle.loads(metadata)
+
+def write_metadata(path, metadata):
+    metastr = pickle.dumps(metadata, PICKLE_PROTOCOL)
+    key = 0
+    while metastr:
+        xattr.set(path, '%s%s' % (METADATA_KEY, key or ''), metastr[:254])
+        metastr = metastr[254:]
+        key += 1
+
+
+# account_stat contains
+#    account - account name apparently, but why not "name"?
+#    created_at - text, what is this?
+#    put_timestamp - '0'
+#    delete_timestamp - '0'
+#    container_count
+#    object_count
+#    bytes_used
+#    hash - of the above and name
+#    id - huh?
+#  + status (== 'DELETED')
+#    status_changed_at - '0'
+#  ? metadata - pickled? We save in xattr.
+
+# We should not need a whole broker as a vessel for underlying implementation,
+# since we're not a database, but what the heck... It works just fine for now.
+# XXX If we're going to duck-type DiskDir anyway, why not codify it as LFS API?
+# XXX How about implementing a POSIX broker that does not use xattr?
+class PosixAccountBroker(object):
+
+    def __init__(self, path):
+        self.datadir = path
+        self.metadata = {}
+
+    def initialize(self, timestamp):
+        # Junaid tries Exception and checkes for err.errno!=errno.EEXIST, but
+        # in theory this should not be necessary if we implement the broker
+        # protocol properly (Junaid's code has an empty initialize()).
+        os.makedirs(self.datadir)
+        xattr.set(self.datadir, STATUS_KEY, 'OK')
+        write_metadata(self.datadir, self.metadata)
+        ts = int(float(timestamp))
+        os.utime(self.datadir, (ts, ts))
+
+    def is_deleted(self):
+        # account is not there (put_timestamp, delete_timestamp comparison)
+        return not os.path.exists(self.datadir)
+
+    def is_status_deleted(self):
+        # underlying account is marked as deleted
+        status = xattr.get(self.datadir, 'user.swift.status')
+        return status == 'DELETED'
+
+    def get_info(self):
+        name = os.path.basename(self.datadir)
+        st = os.stat(self.datadir)
+        # XXX container_count, object_count, bytes_used
+        return {'account': name,
+                'created_at': st.st_ctime,
+                'put_timestamp': st.st_mtime,
+                'delete_timestamp': 0,
+                'container_count': 0,
+                'object_count': 0,
+                'bytes_used': 0,
+                'hash': '',
+                'id': ''}
+
+    # This is called a something_iter, but it is not actually an iterator.
+    def list_containers_iter(self, limit,marker,end_marker,prefix,delimiter):
+        # XXX implement marker, delimeter; consult CF devguide
+
+        containers = os.listdir(self.datadir)
+        containers.sort()
+        containers.reverse()
+
+        retults = []
+        count = 0
+        for cont in containers:
+            if prefix:
+                if not container.startswith(prefix):
+                    continue
+            if marker:
+                if cont == marker:
+                    marker = None
+                continue
+            if count < limit:
+                # XXX (name, object_count, bytes_used, is_subdir)
+                # XXX Should we encode in UTF-8 here or later?
+                results.append([cont, 0, 0, 1])
+                count += 1
+        return results
+
+    #def update_metadata(self, metadata):
+    #    if metadata:
+    #        new_metadata = self.metadata.copy()
+    #        new_metadata.update(metadata)
+    #        if new_metadata != self.metadata:
+    #            write_metadata(self.datadir, new_metadata)
+    #            self.metadata = new_metadata
+
+    #def update_put_timestamp(self, timestamp):
+    #    ts = int(float(timestamp))
+    #    os.utime(self.datadir, (ts, ts))
+
+class PosixContainerBroker(object):
+
+    def __init__(self, path):
+        self.datadir = path
+        self.metadata = {}
+
+    def initialize(self, timestamp):
+        os.makedirs(self.datadir)
+        write_metadata(self.datadir, self.metadata)
+        ts = int(float(timestamp))
+        os.utime(self.datadir, (ts, ts))
+
+    def is_deleted(self):
+        # may need to add more sophisticated checks later
+        return not os.path.exists(self.datadir)
+
+    def update_metadata(self, metadata):
+        if metadata:
+            new_metadata = self.metadata.copy()
+            new_metadata.update(metadata)
+            if new_metadata != self.metadata:
+                write_metadata(self.datadir, new_metadata)
+                self.metadata = new_metadata
+
+    def update_put_timestamp(self, timestamp):
+        ts = int(float(timestamp))
+        os.utime(self.datadir, (ts, ts))
+
 class AccControllerPosix(Controller):
     """WSGI controller for account requests"""
     server_type = 'Account'
 
     def __init__(self, app, account_name, **kwargs):
         Controller.__init__(self, app)
+        self.app = app
         self.account_name = unquote(account_name)
         # XXX needed?
         # if not self.app.allow_account_management:
@@ -52,16 +204,128 @@ class AccControllerPosix(Controller):
     @public
     def GET(self, req):
         """Handler for HTTP GET requests."""
-        resp = HTTPBadRequest(request=req)
-        resp.body = 'Not implemented'
-        return resp
+        try:
+            v1, account = split_path(unquote(req.path), 2, 2)
+        except ValueError, err:
+            return HTTPBadRequest(body=str(err), content_type='text/plain',
+                                  request=req)
+        broker = self._get_account_broker(account)
+        if broker.is_deleted():
+            # XXX extend initialize() so it reports more detailed errors
+            broker.initialize(time.time())
+            if broker.is_deleted():
+                return HTTPNotFound(request=req)
+            created = True
+        else:
+            created = False
+        info = broker.get_info()
+        resp_headers = {
+            'X-Account-Container-Count': info['container_count'],
+            'X-Account-Object-Count': info['object_count'],
+            'X-Account-Bytes-Used': info['bytes_used'],
+            'X-Timestamp': info['created_at'],
+            'X-PUT-Timestamp': info['put_timestamp']}
+        resp_headers.update((key, value)
+                            for key, (value, timestamp) in
+                            broker.metadata.iteritems() if value != '')
+        try:
+            prefix = get_param(req, 'prefix')
+            delimiter = get_param(req, 'delimiter')
+            if delimiter and (len(delimiter) > 1 or ord(delimiter) > 254):
+                # delimiters can be made more flexible later
+                return HTTPPreconditionFailed(body='Bad delimiter')
+            limit = ACCOUNT_LISTING_LIMIT
+            given_limit = get_param(req, 'limit')
+            if given_limit and given_limit.isdigit():
+                limit = int(given_limit)
+                if limit > ACCOUNT_LISTING_LIMIT:
+                    return HTTPPreconditionFailed(request=req,
+                                                  body='Maximum limit is %d' %
+                                                  ACCOUNT_LISTING_LIMIT)
+            marker = get_param(req, 'marker', '')
+            end_marker = get_param(req, 'end_marker')
+            query_format = get_param(req, 'format')
+        except UnicodeDecodeError, err:
+            return HTTPBadRequest(body='parameters not utf8',
+                                  content_type='text/plain', request=req)
+        if query_format:
+            req.accept = FORMAT2CONTENT_TYPE.get(query_format.lower(),
+                                                 FORMAT2CONTENT_TYPE['plain'])
+        out_content_type = req.accept.best_match(
+            ['text/plain', 'application/json', 'application/xml', 'text/xml'])
+        if not out_content_type:
+            return HTTPNotAcceptable(request=req)
+        account_list = broker.list_containers_iter(limit, marker, end_marker,
+                                                   prefix, delimiter)
+        if out_content_type == 'application/json':
+            data = []
+            for (name, object_count, bytes_used, is_subdir) in account_list:
+                if is_subdir:
+                    data.append({'subdir': name})
+                else:
+                    data.append({'name': name, 'count': object_count,
+                                'bytes': bytes_used})
+            account_list = json.dumps(data)
+        elif out_content_type.endswith('/xml'):
+            output_list = ['<?xml version="1.0" encoding="UTF-8"?>',
+                           '<account name="%s">' % account]
+            for (name, object_count, bytes_used, is_subdir) in account_list:
+                name = saxutils.escape(name)
+                if is_subdir:
+                    output_list.append('<subdir name="%s" />' % name)
+                else:
+                    item = '<container><name>%s</name><count>%s</count>' \
+                           '<bytes>%s</bytes></container>' % \
+                           (name, object_count, bytes_used)
+                    output_list.append(item)
+            output_list.append('</account>')
+            account_list = '\n'.join(output_list)
+        else:
+            if not account_list:
+                return HTTPNoContent(request=req, headers=resp_headers)
+            account_list = '\n'.join(r[0] for r in account_list) + '\n'
+        ret = Response(body=account_list, request=req, headers=resp_headers)
+        ret.content_type = out_content_type
+        ret.charset = 'utf-8'
+        return ret
 
     @public
     def HEAD(self, req):
         """Handler for HTTP HEAD requests."""
-        resp = HTTPBadRequest(request=req)
-        resp.body = 'Not implemented'
-        return resp
+        try:
+            v1, account = split_path(unquote(req.path), 2, 2)
+        except ValueError, err:
+            return HTTPBadRequest(body=str(err), content_type='text/plain',
+                                  request=req)
+        broker = self._get_account_broker(account)
+        if broker.is_deleted():
+            # XXX extend initialize() so it reports more detailed errors
+            broker.initialize(time.time())
+            if broker.is_deleted():
+                return HTTPNotFound(request=req)
+            created = True
+        else:
+            created = False
+        info = broker.get_info()
+        headers = {
+            'X-Account-Container-Count': info['container_count'],
+            'X-Account-Object-Count': info['object_count'],
+            'X-Account-Bytes-Used': info['bytes_used'],
+            'X-Timestamp': info['created_at'],
+            'X-PUT-Timestamp': info['put_timestamp']}
+        headers.update((key, value)
+                       for key, (value, timestamp) in
+                       broker.metadata.iteritems() if value != '')
+        if get_param(req, 'format'):
+            req.accept = FORMAT2CONTENT_TYPE.get(
+                get_param(req, 'format').lower(), FORMAT2CONTENT_TYPE['plain'])
+        headers['Content-Type'] = req.accept.best_match(
+            ['text/plain', 'application/json', 'application/xml', 'text/xml'])
+        if not headers['Content-Type']:
+            return HTTPNotAcceptable(request=req)
+        if created:
+            return HTTPCreated(request=req, headers=headers, charset='utf-8')
+        return HTTPNoContent(request=req, headers=headers, charset='utf-8')
 
     # XXX later
     # @public
@@ -73,12 +337,20 @@ class AccControllerPosix(Controller):
     # @public
     # def DELETE(self, req):
 
+    def _get_account_broker(self, account):
+        path = os.path.join(self.app.lfs_root, account)
+        return PosixAccountBroker(path)
+
 class ContControllerPosix(Controller):
     """WSGI controller for container requests"""
     server_type = 'Container'
+    #save_headers = ['x-container-read', 'x-container-write',
+    #                'x-container-sync-key', 'x-container-sync-to']
+    save_headers = []
 
     def __init__(self, app, account_name, **kwargs):
         Controller.__init__(self, app)
+        self.app = app
         self.account_name = unquote(account_name)
 
     @public
@@ -99,11 +371,49 @@ class ContControllerPosix(Controller):
     # @public
     # def POST(self, req):
 
-    # @public
-    # def PUT(self, req):
+    @public
+    def PUT(self, req):
+        """Handle HTTP PUT request."""
+        try:
+            v1, account, container, obj = split_path(unquote(req.path), 3, 4)
+        except ValueError, err:
+            return HTTPBadRequest(body=str(err), content_type='text/plain',
+                                  request=req)
+        # Seems senseless to pump timestamps through a string format,
+        # but the main body of Swift code does that, so we keep it for now.
+        timestamp = normalize_timestamp(time.time())
+        broker = self._get_container_broker(account, container)
+        if broker.is_deleted():
+            broker.initialize(timestamp)
+            created = True
+        else:
+            created = False
+        metadata = {}
+        metadata.update(
+            (key, (value, timestamp))
+            for key, value in req.headers.iteritems()
+            if key.lower() in self.save_headers or
+            key.lower().startswith('x-container-meta-'))
+        if metadata:
+            broker.update_metadata(metadata)
+        else:
+            broker.update_put_timestamp(timestamp)
+        if broker.is_deleted():
+            return HTTPConflict(request=req)
+        # XXX implement reporting to account
+        #resp = self.account_update(req, account, container, broker)
+        #if resp:
+        #    return resp
+        if created:
+            return HTTPCreated(request=req)
+        return HTTPAccepted(request=req)
 
     # @public
     # def DELETE(self, req):
+
+    def _get_container_broker(self, account, container):
+        path = os.path.join(self.app.lfs_root, account, container)
+        return PosixContainerBroker(path)
 
 
 class AccControllerGluster(Controller):
@@ -130,9 +440,7 @@ class AccControllerGluster(Controller):
     def HEAD(self, req):
         """Handler for HTTP HEAD requests."""
         try:
-            # XXX Container when accessing account? Is this ever possible (4)?
-            v1, account = split_path(unquote(req.path), 2, 3)
-            #validate_device_partition(drive, part)
+            v1, account = split_path(unquote(req.path), 2, 2)
         except ValueError, err:
             return HTTPBadRequest(body=str(err), content_type='text/plain',
                                   request=req)
@@ -142,7 +450,6 @@ class AccControllerGluster(Controller):
         broker = DiskAccount(self.app.lfs_root, self.ufo_drive, account,
                              self.app.logger)
         if broker.is_deleted():
-            # XXX Auto-create account
             resp = self._put(req, broker, account, None)
             if resp != HTTPCreated:
                 return resp
@@ -184,7 +491,6 @@ class AccControllerGluster(Controller):
         broker.pending_timeout = 0.1
         broker.stale_reads_ok = True
         if broker.is_deleted():
-            # XXX Auto-create account
             resp = self._put(req, broker, account, None)
             if resp != HTTPCreated:
                 return resp
@@ -305,10 +611,6 @@ class AccControllerGluster(Controller):
             return HTTPCreated(request=req)
         else:   # put account
             timestamp = normalize_timestamp(time.time())
-            # P3
-            fp = open("/tmp/dump","a")
-            print >>fp, "db_file", broker.db_file
-            fp.close()
             if not os.path.exists(broker.db_file):
                 broker.initialize(timestamp)
                 created = True
