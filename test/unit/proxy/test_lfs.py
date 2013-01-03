@@ -135,26 +135,23 @@ def _setup(state, mode):
     prospa = spawn(wsgi.server, prolis, prosrv, nl)
     state.coros = (prospa,)
 
-    # Create account
+    # Create account (can only be done with HEAD, never GET)
     # XXX Why not create a controller directly and invoke it?
     # XXX Why not connect_tcp(prolis.getsockname())?
     sock = connect_tcp(('localhost', prolis.getsockname()[1]))
     fd = sock.makefile()
-    # P3
     fd.write('HEAD /v1/a HTTP/1.1\r\nHost: localhost\r\n'
                  'Connection: close\r\nContent-Length: 0\r\n\r\n')
-    #fd.write('GET /v1/a HTTP/1.1\r\nHost: localhost\r\n'
-    #             'Connection: close\r\nContent-Length: 0\r\n\r\n')
     fd.flush()
     # P3
     # headers = readuntil2crlfs(fd)
     headers = fd.read()
-    exp = 'HTTP/1.1 201'
     # P3
     fp = open("/tmp/dump","a")
     print >>fp, "== HEAD"
     print >>fp, headers
     fp.close()
+    exp = 'HTTP/1.1 201'
     assert(headers[:len(exp)] == exp)
 
     # Create container
@@ -164,7 +161,14 @@ def _setup(state, mode):
              'Connection: close\r\nX-Auth-Token: t\r\n'
              'Content-Length: 0\r\n\r\n')
     fd.flush()
-    headers = readuntil2crlfs(fd)
+    # P3
+    #headers = readuntil2crlfs(fd)
+    headers = fd.read()
+    # P3
+    fp = open("/tmp/dump","a")
+    print >>fp, "== PUT"
+    print >>fp, headers
+    fp.close()
     exp = 'HTTP/1.1 201'
     assert(headers[:len(exp)] == exp)
 

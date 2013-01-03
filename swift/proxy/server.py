@@ -38,8 +38,8 @@ from swift.common.utils import cache_from_env, get_logger, \
 from swift.common.constraints import check_utf8
 from swift.proxy.controllers import AccountController, ObjectController, \
     ContainerController, Controller
-from swift.proxy.controllers.lfs import (AccControllerPosix,
-    ContControllerPosix, AccControllerGluster, ContControllerGluster)
+from swift.proxy.controllers.lfs import LFSAccountController, \
+    LFSContainerController
 from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPForbidden, \
     HTTPMethodNotAllowed, HTTPNotFound, HTTPPreconditionFailed, \
     HTTPRequestEntityTooLarge, HTTPRequestTimeout, HTTPServerError, \
@@ -132,15 +132,12 @@ class Application(object):
                  account_name=account,
                  container_name=container,
                  object_name=obj)
-        if self.lfs_mode == 'posix':
-            ac = AccControllerPosix
-            cc = ContControllerPosix
-        elif self.lfs_mode == 'gluster':
-            ac = AccControllerGluster
-            cc = ContControllerGluster
-        else:
+        if not self.lfs_mode or self.lfs_mode == 'swift':
             ac = AccountController
             cc = ContainerController
+        else:
+            ac = LFSAccountController
+            cc = LFSContainerController
         if obj and container and account:
             return ObjectController, d
         elif container and account:
