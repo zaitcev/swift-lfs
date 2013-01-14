@@ -411,18 +411,42 @@ def _get_pbroker(app, account, container):
 # XXX What's up with the argument-driven a/c/o polymorphism, good or no good?
 class LFSPlugin(object):
     # Methods that plugins implement (how to do abstract methods in Python?)
+    # Not every method is applicable to every plugin kind, e.g. delete_object
+    # applies to containers only. Obvious, but mind it.
     #  __init__(self, app, account, container, obj)
+    #    The app must be a Swift app, with app.conf, app.logger and the like.
     #  exists(self)
-    #  initialize(self, timestamp) -- XXX return an error
+    #    Return True is object exists. Since tombstoning is an implementation,
+    #    we do not have is_deleted().
+    #  initialize(self, timestamp) -- XXX return an error if failed
     #  get_into(self)
+    #    Return the dict with the properties, same as legacy.
+    #  #get_container_timestamp(self)
+    #    This is something we postponed implementing, hoping that get_info()
+    #    be sufficient. Used in HEAD request by legacy code.
     #  update_metadata(self, metadata)
     #  update_put_timestamp(self, timestamp)
+    #    Note that timestamps are always strings, not floats or ints. It may
+    #    be unpleasant for plugins, but helps Swift to form HTTP headers.
     #  list_containers_iter(self, limit,marker,end_marker,prefix,delimiter)
+    #    As comments mention everywhere, this is not an iterator, just
+    #    confusing name. Returns a full list of containers. XXX maybe rename
     #  put_container(self, container, put_timestamp, delete_timestamp,
     #                obj_count, bytes_used)
-    #  #put_object(self)
+    #  #put_object(self, name, timestamp, size, content_type, etag, deleted=0)
+    #  #list_objects_iter(self, limit,marker,end_marker,prefix,delimiter,path)
+    #  #__call__(self) - to be assigned to Request.app_iter
+    #    It seems that swob essentially requires the supplied callable of GET
+    #    to be a class, because it checks for hasattr('app_iter_ranges').
+    #  #app_iter_ranges(self, ....)
+    #  #delete_object(self, name, timestamp)
     # Properties that plugins implement
-    #  metadata - read-only
+    #  metadata
+    #    The metadata property must be accessed for lookup only. We may
+    #    enforce the it later with a @property.
+    # TBD methods possibly for plugins to implement
+    #  - expiration
+    #  - segmentation and manifest
     pass
 
 # XXX How about implementing a POSIX pbroker that does not use xattr?
