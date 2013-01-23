@@ -13,10 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import cPickle as pickle
-import os
+import pkg_resources
 import time
-import xattr
 from urllib import unquote
 
 from swift.common.constraints import (ACCOUNT_LISTING_LIMIT, check_mount,
@@ -32,39 +30,27 @@ from swift.common.swob import (HTTPAccepted,
     HTTPNotFound,
     HTTPPreconditionFailed,
     Response)
-from swift.common.utils import (get_logger, get_param, json,
-    normalize_timestamp, public, split_path, validate_device_partition)
+from swift.common.utils import (get_param, json,
+    normalize_timestamp, public, split_path)
 from swift.proxy.controllers.base import Controller
 
-from gluster.swift.common.DiskDir import DiskDir, DiskAccount
 
+# raise Exception("LFS unknown %s" % str(self.app.lfs_mode))
+def load_the_plugin(selector):
+    # Special-case a local plugin - primarily for testing
+    if selector == 'posix':
+        import swift.proxy.lfs_posix
+        return swift.proxy.lfs_posix.LFSPluginPosix
+    # XXX
+    if selector == 'gluster':
+        import gluster.swift.common.lfs_plugin
+        return gluster.swift.common.lfs_plugin.LFSPluginGluster
+    group = 'swift.lfs_plugin.%s' % selector
+    name = 'plugin_class'
+    entry_point = pkg_resources.iter_entry_points(group, name=name)[0]
+    plugin_class = entry_point.load()
+    return plugin_class
 
-METADATA_KEY = 'user.swift.metadata'
-#STATUS_KEY = 'user.swift.status'
-CONTCNT_KEY = 'user.swift.container_count'
-PICKLE_PROTOCOL = 2
-#MAX_XATTR_SIZE = 65536
-
-# Using the same metadata protocol as the object server normally uses.
-# XXX Gluster has a more elaborate verion with gradual unpickling. Why?
-def read_metadata(path):
-    metadata = ''
-    key = 0
-    try:
-        while True:
-            metadata += xattr.get(path, '%s%s' % (METADATA_KEY, (key or '')))
-            key += 1
-    except IOError:
-        pass
-    return pickle.loads(metadata)
-
-def write_metadata(path, metadata):
-    metastr = pickle.dumps(metadata, PICKLE_PROTOCOL)
-    key = 0
-    while metastr:
-        xattr.set(path, '%s%s' % (METADATA_KEY, key or ''), metastr[:254])
-        metastr = metastr[254:]
-        key += 1
 
 
 # account_stat table contains
@@ -100,6 +86,9 @@ class LFSAccountController(Controller):
         # XXX the config problem XXX
         self.auto_create_account_prefix = "."
 
+        # XXX this loads the class on every request
+        self.plugin_class = load_the_plugin(self.app.lfs_mode)
+
     @public
     def HEAD(self, req):
         """Handler for HTTP HEAD requests."""
@@ -111,7 +100,7 @@ class LFSAccountController(Controller):
         # XXX Wait, this can't be right. We mount on the root, right?
         #if not check_mount(self.app.lfs_root, drive):
         #    return HTTPInsufficientStorage(drive=drive, request=req)
-        pbroker = _get_pbroker(self.app, account, None)
+        pbroker = self.plugin_class(self.app, account, None, None)
         created = False
         if not pbroker.exists():
             # XXX see, if only initialize() returned an error...
@@ -153,7 +142,7 @@ class LFSAccountController(Controller):
                                   request=req)
         #if not check_mount(self.app.lfs_root, self.ufo_drive):
         #    return HTTPInsufficientStorage(request=req)
-        pbroker = _get_pbroker(self.app, account, None)
+        pbroker = self.plugin_class(self.app, account, None, None)
         # XXX Why does it work to assign these variables to Gluster?
         # The DiskDir.py and friends do not seem to contain any code
         # to make this work or delegate to stock Swift.
@@ -253,7 +242,7 @@ class LFSAccountController(Controller):
                                   request=req)
         #if not check_mount(self.app.lfs_root, self.ufo_drive):
         #    return HTTPInsufficientStorage(request=req)
-        pbroker = _get_pbroker(self.app, account, None)
+        pbroker = self.plugin_class(self.app, account, None, None)
 
         timestamp = normalize_timestamp(time.time())
         if not pbroker.exists():
@@ -298,6 +287,9 @@ class LFSContainerController(Controller):
         #    app.conf.get('auto_create_account_prefix') or '.'
         self.auto_create_account_prefix = "."
 
+        # XXX this loads the class on every request
+        self.plugin_class = load_the_plugin(self.app.lfs_mode)
+
     # This is modelled at account_update() but is only called internally
     # in case of pbroker.
     def _account_update(self, req, account, container, pbroker):
@@ -321,7 +313,7 @@ class LFSContainerController(Controller):
         #if req.headers.get('x-account-override-deleted', 'no').lower() == \
         #        'yes':
         #    account_headers['x-account-override-deleted'] = 'yes'
-        account_pbroker = _get_pbroker(self.app, account, None)
+        account_pbroker = self.plugin_class(self.app, account, None, None)
         #if account_headers.get('x-account-override-deleted', 'no').lower() != \
         #        'yes' and account_broker.is_deleted():
         #    return HTTPNotFound(request=req)
@@ -352,7 +344,7 @@ class LFSContainerController(Controller):
             return HTTPBadRequest(body=str(err), content_type='text/plain',
                                   request=req)
         timestamp = normalize_timestamp(time.time())
-        pbroker = _get_pbroker(self.app, account, container)
+        pbroker = self.plugin_class(self.app, account, container, None)
 
         #if obj:     # put container object
         #    if account.startswith(self.auto_create_account_prefix) and \
@@ -393,16 +385,6 @@ class LFSContainerController(Controller):
             return HTTPCreated(request=req)
         else:
             return HTTPAccepted(request=req)
-
-
-def _get_pbroker(app, account, container):
-    if app.lfs_mode == 'gluster':
-        pbroker = LFSPluginGluster
-    elif app.lfs_mode == 'posix':
-        pbroker = LFSPluginPosix
-    else:
-        raise Exception("LFS unknown %s" % str(self.app.lfs_mode))
-    return pbroker(app, account, container, None)
 
 
 # XXX Not sure if it even makes sense to inherit if we get plugins loaded
@@ -448,183 +430,3 @@ class LFSPlugin(object):
     #  - expiration
     #  - segmentation and manifest
     pass
-
-# XXX How about implementing a POSIX pbroker that does not use xattr?
-class LFSPluginPosix(LFSPlugin):
-    def __init__(self, app, account, container, obj):
-        if obj:
-            path = os.path.join(app.lfs_root, account, container, obj)
-            self._type = 0 # like port 6010
-        elif container:
-            path = os.path.join(app.lfs_root, account, container)
-            self._type = 1 # like port 6011
-        else:
-            path = os.path.join(app.lfs_root, account)
-            self._type = 2 # like port 6012
-        # P3
-        fp = open("/tmp/dump","a")
-        print >>fp, "posix path", path
-        fp.close()
-        self.datadir = path
-        if os.path.exists(path):
-            self.metadata = read_metadata(path)
-        else:
-            self.metadata = {}
-
-    def exists(self):
-        # The conventional Swift tries to distinguish between a valid account
-        # and one that was initialized in the broker, doing complex checks
-        # such as put_timestamp, delete_timestamp comparison. We omit that.
-        # For now.
-        return os.path.exists(self.datadir)
-
-    def initialize(self, timestamp):
-        # Junaid tries Exception and checkes for err.errno!=errno.EEXIST, but
-        # in theory this should not be necessary if we implement the broker
-        # protocol properly (Junaid's code has an empty initialize()).
-        os.makedirs(self.datadir)
-        #xattr.set(self.datadir, STATUS_KEY, 'OK')
-        # Keeping stats counts in EA must be ridiculously inefficient. XXX
-        if self._type == 2:
-            xattr.set(self.datadir, CONTCNT_KEY, str(0))
-        write_metadata(self.datadir, self.metadata)
-        ts = int(float(timestamp))
-        os.utime(self.datadir, (ts, ts))
-
-    # All the status machinery is not intended in p-broker. Maybe never.
-    #def is_status_deleted(self):
-    #    # underlying account is marked as deleted
-    #    status = xattr.get(self.datadir, STATUS_KEY)
-    #    return status == 'DELETED'
-
-    def get_info(self):
-        name = os.path.basename(self.datadir)
-        st = os.stat(self.datadir)
-        if self._type == 2:
-            cont_cnt_str = xattr.get(self.datadir, CONTCNT_KEY)
-            try:
-                container_count = int(cont_cnt_str)
-            except ValueError:
-                cont_cnt_str = "0"
-            # XXX object_count, bytes_used
-            return {'account': name,
-                'created_at': normalize_timestamp(st.st_ctime),
-                'put_timestamp': normalize_timestamp(st.st_mtime),
-                'delete_timestamp': '0',
-                'container_count': cont_cnt_str,
-                'object_count': '0',
-                'bytes_used': '0',
-                'hash': '-',
-                'id': ''}
-        else:
-            # XXX container info has something different in it, what is it?
-            return {'container': name,
-                'created_at': normalize_timestamp(st.st_ctime),
-                'put_timestamp': normalize_timestamp(st.st_mtime),
-                'delete_timestamp': '0',
-                'object_count': '0',
-                'bytes_used': '0',
-                'hash': '-',
-                'id': ''}
-
-    # This is called a something_iter, but it is not actually an iterator.
-    def list_containers_iter(self, limit,marker,end_marker,prefix,delimiter):
-        # XXX implement marker, delimeter; consult CF devguide
-
-        containers = os.listdir(self.datadir)
-        containers.sort()
-        containers.reverse()
-
-        retults = []
-        count = 0
-        for cont in containers:
-            if prefix:
-                if not container.startswith(prefix):
-                    continue
-            if marker:
-                if cont == marker:
-                    marker = None
-                continue
-            if count < limit:
-                # XXX (name, object_count, bytes_used, is_subdir)
-                # XXX Should we encode in UTF-8 here or later?
-                results.append([cont, 0, 0, 1])
-                count += 1
-        return results
-
-    def update_metadata(self, metadata):
-        if metadata:
-            new_metadata = self.metadata.copy()
-            new_metadata.update(metadata)
-            if new_metadata != self.metadata:
-                write_metadata(self.datadir, new_metadata)
-                self.metadata = new_metadata
-
-    def update_put_timestamp(self, timestamp):
-        ts = int(float(timestamp))
-        os.utime(self.datadir, (ts, ts))
-
-    def put_container(self, container, put_timestamp, delete_timestamp,
-                      object_count, bytes_used):
-        assert(self._type == 2)
-        # XXX Oops! This cannot be implemented without some kind of a database.
-        # We need to find the record of a specific container; if it exists,
-        # subtract its stats from account stats. Then, add new stats.
-        #  -- look what Gluster people do and copy that, you wheel reinventor
-        # XXX Don't forget locking or transactions.
-
-        #cont_cnt_str = xattr.get(self.datadir, CONTCNT_KEY)
-        #try:
-        #    container_count = int(cont_cnt_str)
-        #except ValueError:
-        #    container_count = 0
-
-# For Gluster UFO we use a thin shim p-broker to traditional Swift broker,
-# which is already implemented by Junaid and Peter. Hopefuly they'll just
-# migrate to LFS later and then we drop this completely -- if we learn how
-# to refer p-brokers in other modules etc. etc. etc.
-class LFSPluginGluster(LFSPlugin):
-    def __init__(self, app, account, container, obj):
-        # XXX config from where? app something? XXX
-        self.ufo_drive = "g"
-
-        if obj:
-            assert("not implemented yet")
-        elif container:
-            self.broker = DiskDir(app.lfs_root, self.ufo_drive, account,
-                                  container, app.logger)
-        else:
-            self.broker = DiskAccount(app.lfs_root, self.ufo_drive, account,
-                                      app.logger)
-        # Ouch. This should work in case of read-only attribute though.
-        self.metadata = self.broker.metadata
-
-    def exists(self):
-        # XXX verify that this works without reopenning the broker
-        # Well, it should.... since initialize() is empty in Gluster.
-        return not self.broker.is_deleted()
-
-    def initialize(self, timestamp):
-        # The method is empty in Gluster 3.3.x but that may change.
-        self.broker.initialize(timestamp)
-
-    def get_info(self):
-        return self.broker.get_info()
-
-    def update_metadata(self, metadata):
-        return self.broker.update_metadata(metadata)
-
-    def update_put_timestamp(self, timestamp):
-        return self.broker.update_put_timestamp(metadata)
-
-    def list_containers_iter(self, limit,marker,end_marker,prefix,delimiter):
-        return self.broker.list_containers_iter(limit, marker, end_marker,
-                                                prefix, delimiter)
-
-    def put_container(self, container, put_timestamp, delete_timestamp,
-                      object_count, bytes_used):
-        # BTW, Gluster in 3.3.x does this:
-        #   self.metadata[X_CONTAINER_COUNT] = (int(ccnt) + 1, put_timestamp)
-        # Pays not attention to container. Discuss it with Peter XXX
-        return self.broker.put_container(container,
-            put_timestamp, delete_timestamp, object_count, bytes_used)

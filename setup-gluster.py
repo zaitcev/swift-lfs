@@ -53,5 +53,8 @@ setup(
         'paste.filter_factory': [
             'gluster=gluster.swift.common.middleware.gluster:filter_factory',
             ],
+        'swift.lfs_plugin.gluster': [
+            'plugin_class=gluster.swift.common.lfs_plugin:LFSPluginGluster'
+            ]
         },
     )
