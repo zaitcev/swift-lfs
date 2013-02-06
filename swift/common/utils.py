@@ -39,9 +39,7 @@ except ImportError:
 import cPickle as pickle
 import glob
 from urlparse import urlparse as stdlib_urlparse, ParseResult
-import socket
 import itertools
-import types
 
 import eventlet
 from eventlet import GreenPool, sleep, Timeout
@@ -69,6 +67,10 @@ SysLogHandler.priority_map['NOTICE'] = 'notice'
 _sys_fsync = None
 _sys_fallocate = None
 _posix_fadvise = None
+
+# If set to non-zero, fallocate routines will fail based on free space
+# available being at or below this amount, in bytes.
+FALLOCATE_RESERVE = 0
 
 # Used by hash_path to offer a bit more security when generating hashes for
 # paths. It simply appends this value to all paths; guessing the hash a path
@@ -156,10 +158,17 @@ class FallocateWrapper(object):
             logging.warn(_("Unable to locate fallocate, posix_fallocate in "
                          "libc.  Leaving as a no-op."))
 
-    def __call__(self, fd, mode, offset, len):
+    def __call__(self, fd, mode, offset, length):
+        """ The length parameter must be a ctypes.c_uint64 """
+        if FALLOCATE_RESERVE > 0:
+            st = os.fstatvfs(fd)
+            free = st.f_frsize * st.f_bavail - length.value
+            if free <= FALLOCATE_RESERVE:
+                raise OSError('FALLOCATE_RESERVE fail %s <= %s' % (
+                    free, FALLOCATE_RESERVE))
         args = {
-            'fallocate': (fd, mode, offset, len),
-            'posix_fallocate': (fd, offset, len)
+            'fallocate': (fd, mode, offset, length),
+            'posix_fallocate': (fd, offset, length)
         }
         return self.fallocate(*args[self.func_name])
 
@@ -179,13 +188,14 @@ def fallocate(fd, size):
     global _sys_fallocate
     if _sys_fallocate is None:
         _sys_fallocate = FallocateWrapper()
-    if size > 0:
-        # 1 means "FALLOC_FL_KEEP_SIZE", which means it pre-allocates invisibly
-        ret = _sys_fallocate(fd, 1, 0, ctypes.c_uint64(size))
-        err = ctypes.get_errno()
-        if ret and err not in (0, errno.ENOSYS, errno.EOPNOTSUPP,
-                               errno.EINVAL):
-            raise OSError(err, 'Unable to fallocate(%s)' % size)
+    if size < 0:
+        size = 0
+    # 1 means "FALLOC_FL_KEEP_SIZE", which means it pre-allocates invisibly
+    ret = _sys_fallocate(fd, 1, 0, ctypes.c_uint64(size))
+    err = ctypes.get_errno()
+    if ret and err not in (0, errno.ENOSYS, errno.EOPNOTSUPP,
+                           errno.EINVAL):
+        raise OSError(err, 'Unable to fallocate(%s)' % size)
 
 
 class FsyncWrapper(object):
@@ -286,7 +296,7 @@ def renamer(old, new):
     try:
         mkdirs(os.path.dirname(new))
         os.rename(old, new)
-    except OSError, err:
+    except OSError:
         mkdirs(os.path.dirname(new))
         os.rename(old, new)
 
@@ -749,6 +759,31 @@ def get_logger(conf, name=None, log_to_console=False, log_route=None,
             except ValueError:
                 print >>sys.stderr, 'Invalid custom handler format [%s]' % hook
     return adapted_logger
+
+
+def get_hub():
+    """
+    Checks whether poll is available and falls back
+    on select if it isn't.
+
+    Note about epoll:
+
+    Review: https://review.openstack.org/#/c/18806/
+
+    There was a problem where once out of every 30 quadrillion
+    connections, a coroutine wouldn't wake up when the client
+    closed its end. Epoll was not reporting the event or it was
+    getting swallowed somewhere. Then when that file descriptor
+    was re-used, eventlet would freak right out because it still
+    thought it was waiting for activity from it in some other coro.
+    """
+    try:
+        import select
+        if hasattr(select, "poll"):
+            return "poll"
+        return "selects"
+    except ImportError:
+        return None
 
 
 def drop_privileges(user):
@@ -1506,6 +1541,18 @@ def list_from_csv(comma_separated_str):
     return []
 
 
+def csv_append(csv_string, item):
+    """
+    Appends an item to a comma-separated string.
+
+    If the comma-separated string is empty/None, just returns item.
+    """
+    if csv_string:
+        return ",".join((csv_string, item))
+    else:
+        return item
+
+
 def reiterate(iterable):
     """
     Consume the first item from an iterator, then re-chain it to the rest of
@@ -1521,8 +1568,8 @@ def reiterate(iterable):
         try:
             chunk = ''
             while not chunk:
-                chunk = next(iterable)
-            return itertools.chain([chunk], iterable)
+                chunk = next(iterator)
+            return itertools.chain([chunk], iterator)
         except StopIteration:
             return []
 

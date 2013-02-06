@@ -33,7 +33,7 @@
 # eventlet_debug = false
 
 [pipeline:main]
-pipeline = catch_errors healthcheck cache ratelimit tempauth proxy-logging proxy-server
+pipeline = catch_errors healthcheck cache ratelimit tempauth container-quotas proxy-logging proxy-server
 
 [app:proxy-server]
 use = egg:swift#proxy
@@ -104,9 +104,6 @@ use = egg:swift#tempauth
 # to the auth subsystem, for granting tokens, etc.
 # auth_prefix = /auth/
 # token_life = 86400
-# This is a comma separated list of hosts allowed to send X-Container-Sync-Key
-# requests.
-# allowed_sync_hosts = 127.0.0.1
 # This allows middleware higher in the WSGI pipeline to override auth
 # processing, useful for middleware such as tempurl and formpost. If you know
 # you're not going to use such middleware and you want a bit of extra security,
@@ -334,3 +331,14 @@ use = egg:swift#proxy_logging
 # What HTTP methods are allowed for StatsD logging (comma-sep); request methods
 # not in this list will have "BAD_METHOD" for the <verb> portion of the metric.
 # log_statsd_valid_http_methods = GET,HEAD,POST,PUT,DELETE,COPY,OPTIONS
+
+# Note: Put before both ratelimit and auth in the pipeline.
+[filter:bulk]
+use = egg:swift#bulk
+# max_containers_per_extraction = 10000
+# max_failed_files = 1000
+# max_deletes_per_request = 1000
+
+# Note: Put after auth in the pipeline.
+[filter:container-quotas]
+use = egg:swift#container_quotas

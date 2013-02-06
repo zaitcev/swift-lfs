@@ -223,8 +223,8 @@ class DiskFile(object):
     def _handle_close_quarantine(self):
         """Check if file needs to be quarantined"""
         try:
-            obj_size = self.get_data_file_size()
-        except DiskFileError, e:
+            self.get_data_file_size()
+        except DiskFileError:
             self.quarantine()
             return
         except DiskFileNotExist:
@@ -489,16 +489,34 @@ class ObjectController(object):
         :param obj: object name
         :param headers_in: dictionary of headers from the original request
         :param headers_out: dictionary of headers to send in the container
-                            request
+                            request(s)
         :param objdevice: device name that the object is in
         """
-        host = headers_in.get('X-Container-Host', None)
-        partition = headers_in.get('X-Container-Partition', None)
-        contdevice = headers_in.get('X-Container-Device', None)
-        if not all([host, partition, contdevice]):
+        conthosts = [h.strip() for h in
+                     headers_in.get('X-Container-Host', '').split(',')]
+        contdevices = [d.strip() for d in
+                       headers_in.get('X-Container-Device', '').split(',')]
+        contpartition = headers_in.get('X-Container-Partition', '')
+
+        if len(conthosts) != len(contdevices):
+            # This shouldn't happen unless there's a bug in the proxy,
+            # but if there is, we want to know about it.
+            self.logger.error(_('ERROR Container update failed: different  '
+                                'numbers of hosts and devices in request: '
+                                '"%s" vs "%s"' %
+                                (headers_in.get('X-Container-Host', ''),
+                                 headers_in.get('X-Container-Device', ''))))
             return
-        self.async_update(op, account, container, obj, host, partition,
-                          contdevice, headers_out, objdevice)
+
+        if contpartition:
+            updates = zip(conthosts, contdevices)
+        else:
+            updates = []
+
+        for conthost, contdevice in updates:
+            self.async_update(op, account, container, obj, conthost,
+                              contpartition, contdevice, headers_out,
+                              objdevice)
 
     def delete_at_update(self, op, delete_at, account, container, obj,
                          headers_in, objdevice):
@@ -516,22 +534,33 @@ class ObjectController(object):
         # At that time, Swift will be so popular and pervasive I will have
         # created income for thousands of future programmers.
         delete_at = max(min(delete_at, 9999999999), 0)
-        host = partition = contdevice = None
+        updates = [(None, None)]
+
+        partition = None
+        hosts = contdevices = [None]
         headers_out = {'x-timestamp': headers_in['x-timestamp'],
                        'x-trans-id': headers_in.get('x-trans-id', '-')}
         if op != 'DELETE':
-            host = headers_in.get('X-Delete-At-Host', None)
             partition = headers_in.get('X-Delete-At-Partition', None)
-            contdevice = headers_in.get('X-Delete-At-Device', None)
+            hosts = headers_in.get('X-Delete-At-Host', '')
+            contdevices = headers_in.get('X-Delete-At-Device', '')
+            updates = [upd for upd in
+                       zip((h.strip() for h in hosts.split(',')),
+                           (c.strip() for c in contdevices.split(',')))
+                       if all(upd) and partition]
+            if not updates:
+                updates = [(None, None)]
             headers_out['x-size'] = '0'
             headers_out['x-content-type'] = 'text/plain'
             headers_out['x-etag'] = 'd41d8cd98f00b204e9800998ecf8427e'
-        self.async_update(
-            op, self.expiring_objects_account,
-            str(delete_at / self.expiring_objects_container_divisor *
-                self.expiring_objects_container_divisor),
-            '%s-%s/%s/%s' % (delete_at, account, container, obj),
-            host, partition, contdevice, headers_out, objdevice)
+
+        for host, contdevice in updates:
+            self.async_update(
+                op, self.expiring_objects_account,
+                str(delete_at / self.expiring_objects_container_divisor *
+                    self.expiring_objects_container_divisor),
+                '%s-%s/%s/%s' % (delete_at, account, container, obj),
+                host, partition, contdevice, headers_out, objdevice)
 
     @public
     @timing_stats
@@ -560,7 +589,7 @@ class ObjectController(object):
         if file.is_deleted() or file.is_expired():
             return HTTPNotFound(request=request)
         try:
-            file_size = file.get_data_file_size()
+            file.get_data_file_size()
         except (DiskFileError, DiskFileNotExist):
             file.quarantine()
             return HTTPNotFound(request=request)
@@ -614,12 +643,10 @@ class ObjectController(object):
         upload_size = 0
         last_sync = 0
         with file.mkstemp() as fd:
-            if 'content-length' in request.headers:
-                try:
-                    fallocate(fd, int(request.headers['content-length']))
-                except OSError:
-                    return HTTPInsufficientStorage(drive=device,
-                                                   request=request)
+            try:
+                fallocate(fd, int(request.headers.get('content-length', 0)))
+            except OSError:
+                return HTTPInsufficientStorage(drive=device, request=request)
             reader = request.environ['wsgi.input'].read
             for chunk in iter(lambda: reader(self.network_chunk_size), ''):
                 upload_size += len(chunk)
@@ -880,7 +907,7 @@ class ObjectController(object):
         self.logger.txn_id = req.headers.get('x-trans-id', None)
 
         if not check_utf8(req.path_info):
-            res = HTTPPreconditionFailed(body='Invalid UTF8')
+            res = HTTPPreconditionFailed(body='Invalid UTF8 or contains NULL')
         else:
             try:
                 # disallow methods which have not been marked 'public'

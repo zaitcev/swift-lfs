@@ -27,7 +27,7 @@ from swift.common.swob import HTTPBadRequest, HTTPForbidden, HTTPNotFound, \
     HTTPUnauthorized
 
 from swift.common.middleware.acl import clean_acl, parse_acl, referrer_allowed
-from swift.common.utils import cache_from_env, get_logger, get_remote_client, \
+from swift.common.utils import cache_from_env, get_logger, \
     split_path, config_true_value
 from swift.common.http import HTTP_CLIENT_CLOSED_REQUEST
 
@@ -77,7 +77,10 @@ class TempAuth(object):
         self.logger.set_statsd_prefix('tempauth.%s' % (
             self.reseller_prefix if self.reseller_prefix else 'NONE',))
         self.auth_prefix = conf.get('auth_prefix', '/auth/')
-        if not self.auth_prefix:
+        if not self.auth_prefix or not self.auth_prefix.strip('/'):
+            self.logger.warning('Rewriting invalid auth prefix "%s" to '
+                                '"/auth/" (Non-empty auth prefix path '
+                                'is required)' % self.auth_prefix)
             self.auth_prefix = '/auth/'
         if self.auth_prefix[0] != '/':
             self.auth_prefix = '/' + self.auth_prefix
@@ -238,7 +241,7 @@ class TempAuth(object):
         """
 
         try:
-            version, account, container, obj = split_path(req.path, 1, 4, True)
+            version, account, container, obj = req.split_path(1, 4, True)
         except ValueError:
             self.logger.increment('errors')
             return HTTPNotFound(request=req)
@@ -335,11 +338,7 @@ class TempAuth(object):
         req.start_time = time()
         handler = None
         try:
-            version, account, user, _junk = split_path(
-                req.path_info,
-                minsegs=1,
-                maxsegs=4,
-                rest_with_last=True)
+            version, account, user, _junk = req.split_path(1, 4, True)
         except ValueError:
             self.logger.increment('errors')
             return HTTPNotFound(request=req)
@@ -379,8 +378,7 @@ class TempAuth(object):
         """
         # Validate the request info
         try:
-            pathsegs = split_path(req.path_info, minsegs=1, maxsegs=3,
-                                  rest_with_last=True)
+            pathsegs = split_path(req.path_info, 1, 3, True)
         except ValueError:
             self.logger.increment('errors')
             return HTTPNotFound(request=req)
@@ -462,7 +460,7 @@ class TempAuth(object):
                                 timeout=float(expires - time()))
         resp = Response(request=req, headers={
             'x-auth-token': token, 'x-storage-token': token})
-        url = self.users[account_user]['url'].replace('$HOST', resp.host_url())
+        url = self.users[account_user]['url'].replace('$HOST', resp.host_url)
         if self.storage_url_scheme != 'default':
             url = self.storage_url_scheme + ':' + url.split(':', 1)[1]
         resp.headers['x-storage-url'] = url

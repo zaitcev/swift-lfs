@@ -23,13 +23,8 @@ from time import time
 import os
 from io import BufferedReader
 
-from swift.common.utils import hash_path, validate_configuration
+from swift.common.utils import hash_path, validate_configuration, json
 from swift.common.ring.utils import tiers_for_dev
-
-try:
-    import simplejson as json
-except ImportError:
-    import json
 
 
 class RingData(object):
@@ -85,7 +80,8 @@ class RingData(object):
         # Write out new-style serialization magic and version:
         file_obj.write(struct.pack('!4sH', 'R1NG', 1))
         ring = self.to_dict()
-        json_text = json.dumps(
+        json_encoder = json.JSONEncoder(sort_keys=True)
+        json_text = json_encoder.encode(
             {'devs': ring['devs'], 'part_shift': ring['part_shift'],
              'replica_count': len(ring['replica2part2dev_id'])})
         json_len = len(json_text)
@@ -100,7 +96,16 @@ class RingData(object):
 
         :param filename: File into which this instance should be serialized.
         """
-        gz_file = GzipFile(filename, 'wb')
+        # Override the timestamp so that the same ring data creates
+        # the same bytes on disk. This makes a checksum comparison a
+        # good way to see if two rings are identical.
+        #
+        # This only works on Python 2.7; on 2.6, we always get the
+        # current time in the gzip output.
+        try:
+            gz_file = GzipFile(filename, 'wb', mtime=1300507380.0)
+        except TypeError:
+            gz_file = GzipFile(filename, 'wb')
         self.serialize_v1(gz_file)
         gz_file.close()
 

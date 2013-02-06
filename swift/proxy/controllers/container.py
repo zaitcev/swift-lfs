@@ -28,11 +28,11 @@ import time
 from urllib import unquote
 from random import shuffle
 
-from swift.common.utils import normalize_timestamp, public
+from swift.common.utils import normalize_timestamp, public, csv_append
 from swift.common.constraints import check_metadata, MAX_CONTAINER_NAME_LENGTH
 from swift.common.http import HTTP_ACCEPTED
 from swift.proxy.controllers.base import Controller, delay_denial, \
-    get_container_memcache_key, headers_to_container_info
+    get_container_memcache_key, headers_to_container_info, cors_validation
 from swift.common.swob import HTTPBadRequest, HTTPForbidden, \
     HTTPNotFound
 
@@ -95,17 +95,20 @@ class ContainerController(Controller):
 
     @public
     @delay_denial
+    @cors_validation
     def GET(self, req):
         """Handler for HTTP GET requests."""
         return self.GETorHEAD(req)
 
     @public
     @delay_denial
+    @cors_validation
     def HEAD(self, req):
         """Handler for HTTP HEAD requests."""
         return self.GETorHEAD(req)
 
     @public
+    @cors_validation
     def PUT(self, req):
         """HTTP PUT request handler."""
         error_response = \
@@ -131,16 +134,8 @@ class ContainerController(Controller):
             return HTTPNotFound(request=req)
         container_partition, containers = self.app.container_ring.get_nodes(
             self.account_name, self.container_name)
-        headers = []
-        for account in accounts:
-            nheaders = {'X-Timestamp': normalize_timestamp(time.time()),
-                        'x-trans-id': self.trans_id,
-                        'X-Account-Host': '%(ip)s:%(port)s' % account,
-                        'X-Account-Partition': account_partition,
-                        'X-Account-Device': account['device'],
-                        'Connection': 'close'}
-            self.transfer_headers(req.headers, nheaders)
-            headers.append(nheaders)
+        headers = self._backend_requests(req, len(containers),
+                                         account_partition, accounts)
         if self.app.memcache:
             cache_key = get_container_memcache_key(self.account_name,
                                                    self.container_name)
@@ -151,6 +146,7 @@ class ContainerController(Controller):
         return resp
 
     @public
+    @cors_validation
     def POST(self, req):
         """HTTP POST request handler."""
         error_response = \
@@ -177,6 +173,7 @@ class ContainerController(Controller):
         return resp
 
     @public
+    @cors_validation
     def DELETE(self, req):
         """HTTP DELETE request handler."""
         account_partition, accounts, container_count = \
@@ -185,14 +182,8 @@ class ContainerController(Controller):
             return HTTPNotFound(request=req)
         container_partition, containers = self.app.container_ring.get_nodes(
             self.account_name, self.container_name)
-        headers = []
-        for account in accounts:
-            headers.append({'X-Timestamp': normalize_timestamp(time.time()),
-                           'X-Trans-Id': self.trans_id,
-                           'X-Account-Host': '%(ip)s:%(port)s' % account,
-                           'X-Account-Partition': account_partition,
-                           'X-Account-Device': account['device'],
-                           'Connection': 'close'})
+        headers = self._backend_requests(req, len(containers),
+                                         account_partition, accounts)
         if self.app.memcache:
             cache_key = get_container_memcache_key(self.account_name,
                                                    self.container_name)
@@ -204,3 +195,26 @@ class ContainerController(Controller):
         if resp.status_int == HTTP_ACCEPTED:
             return HTTPNotFound(request=req)
         return resp
+
+    def _backend_requests(self, req, n_outgoing,
+                          account_partition, accounts):
+        headers = [{'Connection': 'close',
+                    'X-Timestamp': normalize_timestamp(time.time()),
+                    'x-trans-id': self.trans_id}
+                   for _junk in range(n_outgoing)]
+
+        for header in headers:
+            self.transfer_headers(req.headers, header)
+
+        for i, account in enumerate(accounts):
+            i = i % len(headers)
+
+            headers[i]['X-Account-Partition'] = account_partition
+            headers[i]['X-Account-Host'] = csv_append(
+                headers[i].get('X-Account-Host'),
+                '%(ip)s:%(port)s' % account)
+            headers[i]['X-Account-Device'] = csv_append(
+                headers[i].get('X-Account-Device'),
+                account['device'])
+
+        return headers

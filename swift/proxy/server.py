@@ -26,7 +26,6 @@
 
 import mimetypes
 import os
-import time
 from ConfigParser import ConfigParser
 import uuid
 
@@ -37,13 +36,12 @@ from swift.common.utils import cache_from_env, get_logger, \
     get_remote_client, split_path, config_true_value
 from swift.common.constraints import check_utf8
 from swift.proxy.controllers import AccountController, ObjectController, \
-    ContainerController, Controller
+    ContainerController
 from swift.proxy.controllers.lfs import LFSAccountController, \
     LFSContainerController
-from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPForbidden, \
+from swift.common.swob import HTTPBadRequest, HTTPForbidden, \
     HTTPMethodNotAllowed, HTTPNotFound, HTTPPreconditionFailed, \
-    HTTPRequestEntityTooLarge, HTTPRequestTimeout, HTTPServerError, \
-    HTTPServiceUnavailable, HTTPClientDisconnect, status_map, Request, Response
+    HTTPServerError, Request
 
 # P3
 import traceback
@@ -160,7 +158,8 @@ class Application(object):
             req = self.update_request(Request(env))
             return self.handle_request(req)(env, start_response)
         except UnicodeError:
-            err = HTTPPreconditionFailed(request=req, body='Invalid UTF8')
+            err = HTTPPreconditionFailed(
+                request=req, body='Invalid UTF8 or contains NULL')
             return err(env, start_response)
         except (Exception, Timeout):
             # P3
@@ -196,11 +195,12 @@ class Application(object):
             try:
                 if not check_utf8(req.path_info):
                     self.logger.increment('errors')
-                    return HTTPPreconditionFailed(request=req,
-                                                  body='Invalid UTF8')
+                    return HTTPPreconditionFailed(
+                        request=req, body='Invalid UTF8 or contains NULL')
             except UnicodeError:
                 self.logger.increment('errors')
-                return HTTPPreconditionFailed(request=req, body='Invalid UTF8')
+                return HTTPPreconditionFailed(
+                    request=req, body='Invalid UTF8 or contains NULL')
 
             try:
                 controller, path_parts = self.get_controller(req.path)

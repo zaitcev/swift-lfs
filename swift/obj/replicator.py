@@ -33,13 +33,13 @@ from eventlet.support.greenlets import GreenletExit
 from swift.common.ring import Ring
 from swift.common.utils import whataremyips, unlink_older_than, lock_path, \
     compute_eta, get_logger, write_pickle, renamer, dump_recon_cache, \
-    rsync_ip, mkdirs, config_true_value, list_from_csv
+    rsync_ip, mkdirs, config_true_value, list_from_csv, get_hub
 from swift.common.bufferedhttp import http_connect
 from swift.common.daemon import Daemon
 from swift.common.http import HTTP_OK, HTTP_INSUFFICIENT_STORAGE
 from swift.common.exceptions import PathNotDir
 
-hubs.use_hub('poll')
+hubs.use_hub(get_hub())
 
 PICKLE_PROTOCOL = 2
 ONE_WEEK = 604800
@@ -564,7 +564,10 @@ class ObjectReplicator(Daemon):
                 continue
             unlink_older_than(tmp_path, time.time() - self.reclaim_age)
             if not os.path.exists(obj_path):
-                mkdirs(obj_path)
+                try:
+                    mkdirs(obj_path)
+                except Exception:
+                    self.logger.exception('ERROR creating %s' % obj_path)
                 continue
             for partition in os.listdir(obj_path):
                 try:
@@ -586,7 +589,7 @@ class ObjectReplicator(Daemon):
                              nodes=nodes,
                              delete=len(nodes) > len(part_nodes) - 1,
                              partition=partition))
-                except ValueError, OSError:
+                except (ValueError, OSError):
                     continue
         random.shuffle(jobs)
         self.job_count = len(jobs)
@@ -647,7 +650,8 @@ class ObjectReplicator(Daemon):
         self.logger.info(
             _("Object replication complete (once). (%.02f minutes)"), total)
         if not (override_partitions or override_devices):
-            dump_recon_cache({'object_replication_time': total},
+            dump_recon_cache({'object_replication_time': total,
+                              'object_replication_last': time.time()},
                              self.rcache, self.logger)
 
     def run_forever(self, *args, **kwargs):
@@ -661,7 +665,8 @@ class ObjectReplicator(Daemon):
             total = (time.time() - start) / 60
             self.logger.info(
                 _("Object replication complete. (%.02f minutes)"), total)
-            dump_recon_cache({'object_replication_time': total},
+            dump_recon_cache({'object_replication_time': total,
+                              'object_replication_last': time.time()},
                              self.rcache, self.logger)
             self.logger.debug(_('Replication sleeping for %s seconds.'),
                               self.run_pause)

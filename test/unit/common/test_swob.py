@@ -287,6 +287,24 @@ class TestRequest(unittest.TestCase):
         self.assertEquals(req.headers['Content-Type'], 'text/plain')
         self.assertEquals(req.method, 'POST')
 
+    def test_blank_parsing(self):
+        req = swift.common.swob.Request.blank('http://test.com/')
+        self.assertEquals(req.environ['wsgi.url_scheme'], 'http')
+        self.assertEquals(req.environ['SERVER_PORT'], '80')
+        self.assertEquals(req.environ['SERVER_NAME'], 'test.com')
+
+        req = swift.common.swob.Request.blank('https://test.com:456/')
+        self.assertEquals(req.environ['wsgi.url_scheme'], 'https')
+        self.assertEquals(req.environ['SERVER_PORT'], '456')
+
+        req = swift.common.swob.Request.blank('test.com/')
+        self.assertEquals(req.environ['wsgi.url_scheme'], 'http')
+        self.assertEquals(req.environ['SERVER_PORT'], '80')
+        self.assertEquals(req.environ['PATH_INFO'], 'test.com/')
+
+        self.assertRaises(TypeError, swift.common.swob.Request.blank,
+                          'ftp://test.com/')
+
     def test_params(self):
         req = swift.common.swob.Request.blank('/?a=b&c=d')
         self.assertEquals(req.params['a'], 'b')
@@ -409,6 +427,72 @@ class TestRequest(unittest.TestCase):
                                          'QUERY_STRING': 'hello=equal&acl'})
         self.assertEqual(req.path_qs, '/hi/there?hello=equal&acl')
 
+    def test_wsgify(self):
+        used_req = []
+
+        @swift.common.swob.wsgify
+        def _wsgi_func(req):
+            used_req.append(req)
+            return swift.common.swob.Response('200 OK')
+
+        req = swift.common.swob.Request.blank('/hi/there')
+        resp = req.get_response(_wsgi_func)
+        self.assertEqual(used_req[0].path, '/hi/there')
+        self.assertEqual(resp.status_int, 200)
+
+    def test_wsgify_raise(self):
+        used_req = []
+
+        @swift.common.swob.wsgify
+        def _wsgi_func(req):
+            used_req.append(req)
+            raise swift.common.swob.HTTPServerError()
+
+        req = swift.common.swob.Request.blank('/hi/there')
+        resp = req.get_response(_wsgi_func)
+        self.assertEqual(used_req[0].path, '/hi/there')
+        self.assertEqual(resp.status_int, 500)
+
+    def test_split_path(self):
+        """
+        Copied from swift.common.utils.split_path
+        """
+        def _test_split_path(path, minsegs=1, maxsegs=None, rwl=False):
+            req = swift.common.swob.Request.blank(path)
+            return req.split_path(minsegs, maxsegs, rwl)
+        self.assertRaises(ValueError, _test_split_path, '')
+        self.assertRaises(ValueError, _test_split_path, '/')
+        self.assertRaises(ValueError, _test_split_path, '//')
+        self.assertEquals(_test_split_path('/a'), ['a'])
+        self.assertRaises(ValueError, _test_split_path, '//a')
+        self.assertEquals(_test_split_path('/a/'), ['a'])
+        self.assertRaises(ValueError, _test_split_path, '/a/c')
+        self.assertRaises(ValueError, _test_split_path, '//c')
+        self.assertRaises(ValueError, _test_split_path, '/a/c/')
+        self.assertRaises(ValueError, _test_split_path, '/a//')
+        self.assertRaises(ValueError, _test_split_path, '/a', 2)
+        self.assertRaises(ValueError, _test_split_path, '/a', 2, 3)
+        self.assertRaises(ValueError, _test_split_path, '/a', 2, 3, True)
+        self.assertEquals(_test_split_path('/a/c', 2), ['a', 'c'])
+        self.assertEquals(_test_split_path('/a/c/o', 3), ['a', 'c', 'o'])
+        self.assertRaises(ValueError, _test_split_path, '/a/c/o/r', 3, 3)
+        self.assertEquals(_test_split_path('/a/c/o/r', 3, 3, True),
+                          ['a', 'c', 'o/r'])
+        self.assertEquals(_test_split_path('/a/c', 2, 3, True),
+                          ['a', 'c', None])
+        self.assertRaises(ValueError, _test_split_path, '/a', 5, 4)
+        self.assertEquals(_test_split_path('/a/c/', 2), ['a', 'c'])
+        self.assertEquals(_test_split_path('/a/c/', 2, 3), ['a', 'c', ''])
+        try:
+            _test_split_path('o\nn e', 2)
+        except ValueError, err:
+            self.assertEquals(str(err), 'Invalid path: o%0An%20e')
+        try:
+            _test_split_path('o\nn e', 2, 3, True)
+        except ValueError, err:
+            self.assertEquals(str(err), 'Invalid path: o%0An%20e')
+
+
 
 class TestStatusMap(unittest.TestCase):
     def test_status_map(self):
@@ -461,6 +545,24 @@ class TestResponse(unittest.TestCase):
         resp = self._get_response()
         resp.body = u'\N{SNOWMAN}'
         self.assertEquals(resp.body, u'\N{SNOWMAN}'.encode('utf-8'))
+
+    def test_call_reifies_request_if_necessary(self):
+        """
+        The actual bug was a HEAD response coming out with a body because the
+        Request object wasn't passed into the Response object's constructor.
+        The Response object's __call__ method should be able to reify a
+        Request object from the env it gets passed.
+        """
+        def test_app(environ, start_response):
+            start_response('200 OK', [])
+            return ['hi']
+        req = swift.common.swob.Request.blank('/')
+        req.method = 'HEAD'
+        status, headers, app_iter = req.call_application(test_app)
+        resp = swift.common.swob.Response(status=status, headers=dict(headers),
+                                          app_iter=app_iter)
+        output_iter = resp(req.environ, lambda *_: None)
+        self.assertEquals(list(output_iter), [''])
 
     def test_location_rewrite(self):
         def start_response(env, headers):
@@ -716,7 +818,7 @@ class TestResponse(unittest.TestCase):
         env['SERVER_NAME'] = 'bob'
         env['SERVER_PORT'] = '1234'
         del env['HTTP_HOST']
-        self.assertEquals(resp.host_url(), 'http://bob:1234')
+        self.assertEquals(resp.host_url, 'http://bob:1234')
 
     def test_host_url_default_port_squelched(self):
         resp = self._get_response()
@@ -725,7 +827,7 @@ class TestResponse(unittest.TestCase):
         env['SERVER_NAME'] = 'bob'
         env['SERVER_PORT'] = '80'
         del env['HTTP_HOST']
-        self.assertEquals(resp.host_url(), 'http://bob')
+        self.assertEquals(resp.host_url, 'http://bob')
 
     def test_host_url_https(self):
         resp = self._get_response()
@@ -734,7 +836,7 @@ class TestResponse(unittest.TestCase):
         env['SERVER_NAME'] = 'bob'
         env['SERVER_PORT'] = '1234'
         del env['HTTP_HOST']
-        self.assertEquals(resp.host_url(), 'https://bob:1234')
+        self.assertEquals(resp.host_url, 'https://bob:1234')
 
     def test_host_url_https_port_squelched(self):
         resp = self._get_response()
@@ -743,7 +845,7 @@ class TestResponse(unittest.TestCase):
         env['SERVER_NAME'] = 'bob'
         env['SERVER_PORT'] = '443'
         del env['HTTP_HOST']
-        self.assertEquals(resp.host_url(), 'https://bob')
+        self.assertEquals(resp.host_url, 'https://bob')
 
     def test_host_url_host_override(self):
         resp = self._get_response()
@@ -752,7 +854,7 @@ class TestResponse(unittest.TestCase):
         env['SERVER_NAME'] = 'bob'
         env['SERVER_PORT'] = '1234'
         env['HTTP_HOST'] = 'someother'
-        self.assertEquals(resp.host_url(), 'http://someother')
+        self.assertEquals(resp.host_url, 'http://someother')
 
     def test_host_url_host_port_override(self):
         resp = self._get_response()
@@ -761,7 +863,7 @@ class TestResponse(unittest.TestCase):
         env['SERVER_NAME'] = 'bob'
         env['SERVER_PORT'] = '1234'
         env['HTTP_HOST'] = 'someother:5678'
-        self.assertEquals(resp.host_url(), 'http://someother:5678')
+        self.assertEquals(resp.host_url, 'http://someother:5678')
 
     def test_host_url_host_https(self):
         resp = self._get_response()
@@ -770,7 +872,7 @@ class TestResponse(unittest.TestCase):
         env['SERVER_NAME'] = 'bob'
         env['SERVER_PORT'] = '1234'
         env['HTTP_HOST'] = 'someother:5678'
-        self.assertEquals(resp.host_url(), 'https://someother:5678')
+        self.assertEquals(resp.host_url, 'https://someother:5678')
 
     def test_507(self):
         resp = swift.common.swob.HTTPInsufficientStorage()
