@@ -19,7 +19,7 @@
 
 
 from gluster.swift.common.DiskDir import DiskDir, DiskAccount
-
+from gluster.swift.common.DiskFile import Gluster_DiskFile
 
 # Let's just duck-type for avoid circular loading issues.
 #class LFSPluginGluster(lfs.LFSPlugin):
@@ -29,13 +29,20 @@ class LFSPluginGluster():
         self.ufo_drive = "g"
 
         if obj:
-            assert("not implemented yet")
+            # partition is not used in Gluster_DiskFile
+            partition = "-"
+            self.broker = Gluster_DiskFile(app.lfs_root, self.ufo_drive, "-",
+                                           account, container, obj,
+                                           app.logger)
+            self._type = 0 # like port 6010
         elif container:
             self.broker = DiskDir(app.lfs_root, self.ufo_drive, account,
                                   container, app.logger)
+            self._type = 1 # like port 6011
         else:
             self.broker = DiskAccount(app.lfs_root, self.ufo_drive, account,
                                       app.logger)
+            self._type = 2 # like port 6012
         # Ouch. This should work in case of read-only attribute though.
         self.metadata = self.broker.metadata
 
@@ -45,10 +52,15 @@ class LFSPluginGluster():
         return not self.broker.is_deleted()
 
     def initialize(self, timestamp):
+        # Gluster does not have initialize() in DiskFile.
+        if self._type == 0:
+            return
         # The method is empty in Gluster 3.3.x but that may change.
         self.broker.initialize(timestamp)
 
     def get_info(self):
+        if self._type == 0:
+            return None
         return self.broker.get_info()
 
     def update_metadata(self, metadata):
@@ -68,3 +80,18 @@ class LFSPluginGluster():
         # Pays not attention to container. Discuss it with Peter XXX
         return self.broker.put_container(container,
             put_timestamp, delete_timestamp, object_count, bytes_used)
+
+    def mkstemp(self):
+        if self._type != 0:
+            return None
+        return self.broker.mkstemp()
+
+    def put(self, fd, metadata):
+        if self._type != 0:
+            return None
+        return self.broker.put(fd, metadata)
+
+    def unlinkold(self, timestamp):
+        if self._type != 0:
+            return None
+        return self.broker.unlinkold(timestamp)

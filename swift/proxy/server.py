@@ -38,7 +38,7 @@ from swift.common.constraints import check_utf8
 from swift.proxy.controllers import AccountController, ObjectController, \
     ContainerController
 from swift.proxy.controllers.lfs import LFSAccountController, \
-    LFSContainerController
+    LFSContainerController, LFSObjectController
 from swift.common.swob import HTTPBadRequest, HTTPForbidden, \
     HTTPMethodNotAllowed, HTTPNotFound, HTTPPreconditionFailed, \
     HTTPServerError, Request
@@ -133,11 +133,13 @@ class Application(object):
         if not self.lfs_mode or self.lfs_mode == 'swift':
             ac = AccountController
             cc = ContainerController
+            oc = ObjectController
         else:
             ac = LFSAccountController
             cc = LFSContainerController
+            oc = LFSObjectController
         if obj and container and account:
-            return ObjectController, d
+            return oc, d
         elif container and account:
             return cc, d
         elif account and not container and not obj:

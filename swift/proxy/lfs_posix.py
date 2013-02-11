@@ -17,7 +17,9 @@ import cPickle as pickle
 import os
 import xattr
 
-from swift.common.utils import normalize_timestamp
+from contextlib import contextmanager
+
+from swift.common.utils import (normalize_timestamp, renamer)
 
 
 METADATA_KEY = 'user.swift.metadata'
@@ -69,6 +71,7 @@ class LFSPluginPosix():
             self.metadata = read_metadata(path)
         else:
             self.metadata = {}
+        self.tmppath = None
 
     def exists(self):
         # The conventional Swift tries to distinguish between a valid account
@@ -177,3 +180,51 @@ class LFSPluginPosix():
         #    container_count = int(cont_cnt_str)
         #except ValueError:
         #    container_count = 0
+
+    @contextmanager
+    def mkstemp(self):
+        """Contextmanager to make a temporary file."""
+
+        # XXX Bad Zaitcev, no cookie. Create in tmpdir=self.lfs_root/tmp
+        #if not os.path.exists(self.tmpdir):
+        #    mkdirs(self.tmpdir)
+        #fd, self.tmppath = mkstemp(dir=self.tmpdir)
+        fd, self.tmppath = mkstemp(dir=self.datadir)
+        try:
+            yield fd
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            tmppath, self.tmppath = self.tmppath, None
+            try:
+                os.unlink(tmppath)
+            except OSError:
+                pass
+
+    # In our case we don't actually use fd for anything.
+    # XXX wanted? :param extension: extension to be used when making the file
+    def put(self, fd, metadata):
+        """
+        Finalize writing the file on disk, and renames it from the temp file to
+        the real location.  This should be called after the data has been
+        written to the temp file.
+
+        :param fd: file descriptor of the temp file
+        :param metadata: dictionary of metadata to be written
+        """
+        assert self.tmppath is not None
+        # wait, what?
+        #metadata['name'] = self.name
+        timestamp = normalize_timestamp(metadata['X-Timestamp'])
+        write_metadata(self.tmppath, metadata)
+        #if 'Content-Length' in metadata:
+        #    self.drop_cache(fd, 0, int(metadata['Content-Length']))
+        # XXX os.fsync maybe?
+        #tpool.execute(fsync, fd)
+        #renamer(self.tmppath,
+        #        os.path.join(self.datadir, timestamp + extension))
+        renamer(self.tmppath,
+                os.path.join(self.datadir, timestamp))
+        self.metadata = metadata
