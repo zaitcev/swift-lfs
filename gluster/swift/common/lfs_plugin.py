@@ -24,16 +24,16 @@ from gluster.swift.common.DiskFile import Gluster_DiskFile
 # Let's just duck-type for avoid circular loading issues.
 #class LFSPluginGluster(lfs.LFSPlugin):
 class LFSPluginGluster():
-    def __init__(self, app, account, container, obj):
+    def __init__(self, app, account, container, obj, keep_data_fp):
         # XXX config from where? app something? XXX
         self.ufo_drive = "g"
 
         if obj:
-            # partition is not used in Gluster_DiskFile
-            partition = "-"
+            is_readable = False
             self.broker = Gluster_DiskFile(app.lfs_root, self.ufo_drive, "-",
                                            account, container, obj,
-                                           app.logger)
+                                           app.logger,
+                                           keep_data_fp=keep_data_fp)
             self._type = 0 # like port 6010
         elif container:
             self.broker = DiskDir(app.lfs_root, self.ufo_drive, account,
@@ -43,8 +43,17 @@ class LFSPluginGluster():
             self.broker = DiskAccount(app.lfs_root, self.ufo_drive, account,
                                       app.logger)
             self._type = 2 # like port 6012
+        # P3
+        fp = open("/tmp/dump","a")
+        print >>fp, "gluster __init__ type", self._type, "path", self.broker.datadir
+        fp.close()
+
         # Ouch. This should work in case of read-only attribute though.
         self.metadata = self.broker.metadata
+        # P3
+        fp = open("/tmp/dump","a")
+        print >>fp, "gluster __init__ ETag", self.metadata.get('ETag')
+        fp.close()
 
     def exists(self):
         # XXX verify that this works without reopenning the broker
@@ -52,6 +61,10 @@ class LFSPluginGluster():
         return not self.broker.is_deleted()
 
     def initialize(self, timestamp):
+        # P3
+        fp = open("/tmp/dump","a")
+        print >>fp, "gluster initialize path", self.broker.datadir, "ts", timestamp
+        fp.close()
         # Gluster does not have initialize() in DiskFile.
         if self._type == 0:
             return
@@ -89,9 +102,34 @@ class LFSPluginGluster():
     def put(self, fd, metadata):
         if self._type != 0:
             return None
-        return self.broker.put(fd, metadata)
+        ret = self.broker.put(fd, metadata)
+        # P3
+        fp = open("/tmp/dump","a")
+        print >>fp, "gluster put old", self.broker.tmppath, "new", self.broker.data_file
+        fp.close()
+        return ret
+
+    def __iter__(self):
+        return self.broker.__iter__()
+
+    def close(self, verify_file=True):
+        return self.broker.close(verify_file=verify_file)
 
     def unlinkold(self, timestamp):
         if self._type != 0:
             return None
         return self.broker.unlinkold(timestamp)
+
+    def get_data_file_size(self):
+        if self._type != 0:
+            return None
+        return self.broker.get_data_file_size()
+
+    def quarantine(self):
+        if self._type != 0:
+            return None
+        # P3
+        fp = open("/tmp/dump","a")
+        print >>fp, "gluster quarantine"
+        fp.close()
+        return self.broker.quarantine()

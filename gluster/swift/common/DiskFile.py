@@ -113,6 +113,7 @@ class Gluster_DiskFile(DiskFile):
         self.read_to_eof = False
         self.quarantined_dir = None
         self.keep_cache = False
+        self.suppress_file_closing = False
         self.uid = int(uid)
         self.gid = int(gid)
 

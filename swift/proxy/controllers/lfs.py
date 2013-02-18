@@ -25,10 +25,12 @@ from eventlet.queue import Queue
 
 from swift.common.constraints import (ACCOUNT_LISTING_LIMIT, check_mount,
     check_object_creation, FORMAT2CONTENT_TYPE, MAX_FILE_SIZE)
-from swift.common.exceptions import (ChunkReadTimeout,
-    ChunkWriteTimeout, ConnectionTimeout, ListingIterNotFound,
-    ListingIterNotAuthorized, ListingIterError)
-from swift.common.swob import (HTTPAccepted,
+from swift.common.exceptions import (
+    ChunkReadTimeout, ChunkWriteTimeout, ConnectionTimeout,
+    DiskFileError, DiskFileNotExist,
+    ListingIterNotFound, ListingIterNotAuthorized, ListingIterError)
+from swift.common.swob import (
+    HTTPAccepted,
     HTTPBadRequest,
     HTTPConflict,
     HTTPCreated,
@@ -43,6 +45,7 @@ from swift.common.swob import (HTTPAccepted,
 from swift.common.utils import (ContextPool, get_param, json,
     normalize_timestamp, public, split_path)
 from swift.proxy.controllers.base import Controller
+from swift.proxy.controllers.obj import SegmentedIterable
 
 
 import swift.proxy.lfs_posix
@@ -119,7 +122,7 @@ class LFSAccountController(Controller):
         # XXX Wait, this can't be right. We mount on the root, right?
         #if not check_mount(self.app.lfs_root, drive):
         #    return HTTPInsufficientStorage(drive=drive, request=req)
-        pbroker = self.plugin_class(self.app, account, None, None)
+        pbroker = self.plugin_class(self.app, account, None, None, False)
         created = False
         if not pbroker.exists():
             # XXX see, if only initialize() returned an error...
@@ -161,7 +164,7 @@ class LFSAccountController(Controller):
                                   request=req)
         #if not check_mount(self.app.lfs_root, self.ufo_drive):
         #    return HTTPInsufficientStorage(request=req)
-        pbroker = self.plugin_class(self.app, account, None, None)
+        pbroker = self.plugin_class(self.app, account, None, None, False)
         # XXX Why does it work to assign these variables to Gluster?
         # The DiskDir.py and friends do not seem to contain any code
         # to make this work or delegate to stock Swift.
@@ -261,7 +264,7 @@ class LFSAccountController(Controller):
                                   request=req)
         #if not check_mount(self.app.lfs_root, self.ufo_drive):
         #    return HTTPInsufficientStorage(request=req)
-        pbroker = self.plugin_class(self.app, account, None, None)
+        pbroker = self.plugin_class(self.app, account, None, None, False)
 
         timestamp = normalize_timestamp(time.time())
         if not pbroker.exists():
@@ -332,7 +335,7 @@ class LFSContainerController(Controller):
         #if req.headers.get('x-account-override-deleted', 'no').lower() == \
         #        'yes':
         #    account_headers['x-account-override-deleted'] = 'yes'
-        account_pbroker = self.plugin_class(self.app, account, None, None)
+        account_pbroker = self.plugin_class(self.app, account, None,None, False)
         #if account_headers.get('x-account-override-deleted', 'no').lower() != \
         #        'yes' and account_broker.is_deleted():
         #    return HTTPNotFound(request=req)
@@ -363,7 +366,7 @@ class LFSContainerController(Controller):
             return HTTPBadRequest(body=str(err), content_type='text/plain',
                                   request=req)
         timestamp = normalize_timestamp(time.time())
-        pbroker = self.plugin_class(self.app, account, container, None)
+        pbroker = self.plugin_class(self.app, account, container, None, False)
 
         #if obj:     # put container object
         #    if account.startswith(self.auto_create_account_prefix) and \
@@ -492,111 +495,202 @@ class LFSObjectController(Controller):
     #    except ListingIterNotAuthorized:
     #        pass
 
-    ##API - called by base Controller directly
-    #def GETorHEAD(self, req):
-    #    """Handle HTTP GET or HEAD requests."""
-    #    container_info = self._container_info(self.account_name,
-    #                                         self.container_name)
-    #    req.acl = container_info['read_acl']
-    #    if 'swift.authorize' in req.environ:
-    #        aresp = req.environ['swift.authorize'](req)
-    #        if aresp:
-    #            return aresp
+    # Originally this was GET in object server, now transplanted
+    def _get_or_head(self, request):
 
-    #    partition, nodes = self.app.object_ring.get_nodes(
-    #        self.account_name, self.container_name, self.object_name)
-    #    shuffle(nodes)
-    #    resp = self.GETorHEAD_base(
-    #        req, _('Object'), partition,
-    #        self.iter_nodes(partition, nodes, self.app.object_ring),
-    #        req.path_info, len(nodes))
+        pbroker = self.plugin_class(self.app, self.account_name,
+                                    self.container_name, self.object_name,
+                                    True)
+        # XXX Expired - this needs to be processed correctly
+        # if file.is_deleted() or file.is_expired():
+        if not pbroker.exists():
+            if request.headers.get('if-match') == '*':
+                return HTTPPreconditionFailed(request=request)
+            else:
+                return HTTPNotFound(request=request)
+        try:
+            file_size = pbroker.get_data_file_size()
+        except (DiskFileError, DiskFileNotExist):
+            pbroker.quarantine()
+            return HTTPNotFound(request=request)
 
-    #    if 'x-object-manifest' in resp.headers:
-    #        lcontainer, lprefix = \
-    #            resp.headers['x-object-manifest'].split('/', 1)
-    #        lcontainer = unquote(lcontainer)
-    #        lprefix = unquote(lprefix)
-    #        try:
-    #            pages_iter = iter(self._listing_pages_iter(lcontainer, lprefix,
-    #                                                       req.environ))
-    #            listing_page1 = pages_iter.next()
-    #            listing = itertools.chain(listing_page1,
-    #                                      self._remaining_items(pages_iter))
-    #        except ListingIterNotFound:
-    #            return HTTPNotFound(request=req)
-    #        except ListingIterNotAuthorized, err:
-    #            return err.aresp
-    #        except ListingIterError:
-    #            return HTTPServerError(request=req)
-    #        except StopIteration:
-    #            listing_page1 = listing = ()
+        if request.headers.get('if-match') not in (None, '*') and \
+                pbroker.metadata['ETag'] not in request.if_match:
+            pbroker.close()
+            return HTTPPreconditionFailed(request=request)
+        if request.headers.get('if-none-match') is not None:
+            if pbroker.metadata['ETag'] in request.if_none_match:
+                resp = HTTPNotModified(request=request)
+                resp.etag = pbroker.metadata['ETag']
+                pbroker.close()
+                return resp
 
-    #        if len(listing_page1) >= CONTAINER_LISTING_LIMIT:
-    #            resp = Response(headers=resp.headers, request=req,
-    #                            conditional_response=True)
-    #            if req.method == 'HEAD':
-    #                # These shenanigans are because swob translates the HEAD
-    #                # request into a swob EmptyResponse for the body, which
-    #                # has a len, which eventlet translates as needing a
-    #                # content-length header added. So we call the original
-    #                # swob resp for the headers but return an empty iterator
-    #                # for the body.
+        try:
+            if_unmodified_since = request.if_unmodified_since
+        except (OverflowError, ValueError):
+            # catches timestamps before the epoch
+            return HTTPPreconditionFailed(request=request)
+        if if_unmodified_since and \
+                datetime.fromtimestamp(
+                    float(pbroker.metadata['X-Timestamp']), UTC) > \
+                if_unmodified_since:
+            pbroker.close()
+            return HTTPPreconditionFailed(request=request)
+        try:
+            if_modified_since = request.if_modified_since
+        except (OverflowError, ValueError):
+            # catches timestamps before the epoch
+            return HTTPPreconditionFailed(request=request)
+        if if_modified_since and \
+                datetime.fromtimestamp(
+                    float(pbroker.metadata['X-Timestamp']), UTC) < \
+                if_modified_since:
+            pbroker.close()
+            return HTTPNotModified(request=request)
 
-    #                def head_response(environ, start_response):
-    #                    resp(environ, start_response)
-    #                    return iter([])
+        response = Response(app_iter=pbroker,
+                            request=request, conditional_response=True)
+        response.headers['Content-Type'] = pbroker.metadata.get(
+            'Content-Type', 'application/octet-stream')
+        for key, value in pbroker.metadata.iteritems():
+            if key.lower().startswith('x-object-meta-') or \
+                    key.lower() in self.allowed_headers:
+                response.headers[key] = value
+        response.etag = pbroker.metadata['ETag']
+        response.last_modified = float(pbroker.metadata['X-Timestamp'])
+        response.content_length = file_size
 
-    #                head_response.status_int = resp.status_int
-    #                return head_response
-    #            else:
-    #                resp.app_iter = SegmentedIterable(
-    #                    self, lcontainer, listing, resp)
+        # Umm, what?
+        #if response.content_length < self.keep_cache_size and \
+        #        (self.keep_cache_private or
+        #         ('X-Auth-Token' not in request.headers and
+        #          'X-Storage-Token' not in request.headers)):
+        #    pbroker.keep_cache = True
 
-    #        else:
-    #            # For objects with a reasonable number of segments, we'll serve
-    #            # them with a set content-length and computed etag.
-    #            if listing:
-    #                listing = list(listing)
-    #                content_length = sum(o['bytes'] for o in listing)
-    #                last_modified = max(o['last_modified'] for o in listing)
-    #                last_modified = datetime(*map(int, re.split('[^\d]',
-    #                                         last_modified)[:-1]))
-    #                etag = md5(
-    #                    ''.join(o['hash'] for o in listing)).hexdigest()
-    #            else:
-    #                content_length = 0
-    #                last_modified = resp.last_modified
-    #                etag = md5().hexdigest()
-    #            resp = Response(headers=resp.headers, request=req,
-    #                            conditional_response=True)
-    #            resp.app_iter = SegmentedIterable(self, lcontainer, listing,
-    #                                              resp)
-    #            resp.content_length = content_length
-    #            resp.last_modified = last_modified
-    #            resp.etag = etag
-    #        resp.headers['accept-ranges'] = 'bytes'
-    #        # In case of a manifest file of nonzero length, the
-    #        # backend may have sent back a Content-Range header for
-    #        # the manifest. It's wrong for the client, though.
-    #        resp.content_range = None
+        if 'Content-Encoding' in pbroker.metadata:
+            response.content_encoding = pbroker.metadata['Content-Encoding']
+        response.headers['X-Timestamp'] = pbroker.metadata['X-Timestamp']
+        # XXX This is verbatim what stock Swift does: calls Response as if
+        # it were the app, new Response is instantiated. The problem is that
+        # we rolled 2 code paths into 1: proxy and object. Now we have WSGI
+        # app called twice. GET is idempotent, but still we must fix this.
+        return request.get_response(response)
 
-    #    return resp
+    def GETorHEAD(self, req):
+        """Handle HTTP GET or HEAD requests."""
+        container_info = self._container_info(self.account_name,
+                                             self.container_name)
+        req.acl = container_info['read_acl']
+        # XXX Investigate why we only authorize explicitly for obj, but not a,c.
+        if 'swift.authorize' in req.environ:
+            aresp = req.environ['swift.authorize'](req)
+            if aresp:
+                return aresp
 
-    #API
+        ## Basically need to create an iterator that loops "yield chunk".
+        # res = Response(request=req, conditional_response=True)
+        # res.app_iter = self._make_app_iter(node, source)
+
+        resp = self._get_or_head(req)
+        # or maybe self._get() and self._head()
+
+        # also there's this in GETorHEADbase:
+        #    res.environ['swift_x_timestamp'] = \
+        #        source.getheader('x-timestamp')
+        #    res.accept_ranges = 'bytes'
+        #    res.content_length = source.getheader('Content-Length')
+        #    if source.getheader('Content-Type'):
+        #        res.charset = None
+        #        res.content_type = source.getheader('Content-Type')
+        #    return res
+
+        # XXX Manifest handling is ripe for a factoring (below is verbatim cc)
+        if 'x-object-manifest' in resp.headers:
+            lcontainer, lprefix = \
+                resp.headers['x-object-manifest'].split('/', 1)
+            lcontainer = unquote(lcontainer)
+            lprefix = unquote(lprefix)
+            try:
+                pages_iter = iter(self._listing_pages_iter(lcontainer, lprefix,
+                                                           req.environ))
+                listing_page1 = pages_iter.next()
+                listing = itertools.chain(listing_page1,
+                                          self._remaining_items(pages_iter))
+            except ListingIterNotFound:
+                return HTTPNotFound(request=req)
+            except ListingIterNotAuthorized, err:
+                return err.aresp
+            except ListingIterError:
+                return HTTPServerError(request=req)
+            except StopIteration:
+                listing_page1 = listing = ()
+
+            if len(listing_page1) >= CONTAINER_LISTING_LIMIT:
+                resp = Response(headers=resp.headers, request=req,
+                                conditional_response=True)
+                if req.method == 'HEAD':
+                    # These shenanigans are because swob translates the HEAD
+                    # request into a swob EmptyResponse for the body, which
+                    # has a len, which eventlet translates as needing a
+                    # content-length header added. So we call the original
+                    # swob resp for the headers but return an empty iterator
+                    # for the body.
+
+                    def head_response(environ, start_response):
+                        resp(environ, start_response)
+                        return iter([])
+
+                    head_response.status_int = resp.status_int
+                    return head_response
+                else:
+                    resp.app_iter = SegmentedIterable(
+                        self, lcontainer, listing, resp)
+
+            else:
+                # For objects with a reasonable number of segments, we'll serve
+                # them with a set content-length and computed etag.
+                if listing:
+                    listing = list(listing)
+                    content_length = sum(o['bytes'] for o in listing)
+                    last_modified = max(o['last_modified'] for o in listing)
+                    last_modified = datetime(*map(int, re.split('[^\d]',
+                                             last_modified)[:-1]))
+                    etag = md5(
+                        ''.join(o['hash'] for o in listing)).hexdigest()
+                else:
+                    content_length = 0
+                    last_modified = resp.last_modified
+                    etag = md5().hexdigest()
+                resp = Response(headers=resp.headers, request=req,
+                                conditional_response=True)
+                resp.app_iter = SegmentedIterable(self, lcontainer, listing,
+                                                  resp)
+                resp.content_length = content_length
+                resp.last_modified = last_modified
+                resp.etag = etag
+            resp.headers['accept-ranges'] = 'bytes'
+            # In case of a manifest file of nonzero length, the
+            # backend may have sent back a Content-Range header for
+            # the manifest. It's wrong for the client, though.
+            resp.content_range = None
+
+        return resp
+
     #@public
     #@cors_validation
     #@delay_denial
-    #def GET(self, req):
-    #    """Handler for HTTP GET requests."""
-    #    return self.GETorHEAD(req)
+    @public
+    def GET(self, req):
+        """Handler for HTTP GET requests."""
+        return self.GETorHEAD(req)
 
-    #API
     #@public
     #@cors_validation
     #@delay_denial
-    #def HEAD(self, req):
-    #    """Handler for HTTP HEAD requests."""
-    #    return self.GETorHEAD(req)
+    @public
+    def HEAD(self, req):
+        """Handler for HTTP HEAD requests."""
+        return self.GETorHEAD(req)
 
     #@public
     #@cors_validation
@@ -783,7 +877,7 @@ class LFSObjectController(Controller):
             # info = pbroker.get_info()
             # 'X-Timestamp': info['created_at'],
             metadata = {
-                'X-Timestamp': normalize_timestamp(time.time()),
+                'X-Timestamp': req.headers['X-Timestamp'],
                 'Content-Type': req.headers['content-type'],
                 'ETag': etag,
                 'Content-Length': str(upload_size),
@@ -860,7 +954,9 @@ class LFSObjectController(Controller):
         #if not containers:
         #    return HTTPNotFound(request=req)
         pbroker = self.plugin_class(self.app, self.account_name,
-                                    self.container_name, self.object_name)
+                                    self.container_name, self.object_name,
+                                    False)
+
         if 'x-delete-after' in req.headers:
             try:
                 x_delete_after = int(req.headers['x-delete-after'])
@@ -892,12 +988,18 @@ class LFSObjectController(Controller):
         else:
             delete_at_part = delete_at_nodes = None
         # do a HEAD request for container sync and checking object versions
+        # XXX This is some dubious stuff we carried over for versioned objects
         if 'x-timestamp' in req.headers or \
                 (object_versions and not
                  req.environ.get('swift_versioned_copy')):
             # headers={'X-Newest': 'True'},
             info = pbroker.get_info()
-        req.headers['X-Timestamp'] = normalize_timestamp(time.time())
+
+        timestamp = normalize_timestamp(time.time())
+        req.headers['X-Timestamp'] = timestamp
+        if not pbroker.exists():
+            pbroker.initialize(timestamp)
+
         # Sometimes the 'content-type' header exists, but is set to None.
         content_type_manually_set = True
         if not req.headers.get('content-type'):
@@ -940,7 +1042,7 @@ class LFSObjectController(Controller):
                     return HTTPServiceUnavailable(request=req)
                 # not needed to re-load p-broker, copy does not alter source
                 #pbroker = self.plugin_class(self.app, self.account_name,
-                #                    self.container_name, self.object_name)
+                #                 self.container_name, self.object_name, False)
 
         reader = req.environ['wsgi.input'].read
         data_source = iter(lambda: reader(self.app.client_chunk_size), '')
@@ -1638,38 +1740,6 @@ class LFSObjectController(Controller):
     #    resp = response_class(request=request)
     #    return resp
 
-    #tbd for other methods
-    #def __call__(self, env, start_response):
-    #    """WSGI Application entry point for the Swift Object Server."""
-    #    start_time = time.time()
-    #    req = Request(env)
-    #    self.logger.txn_id = req.headers.get('x-trans-id', None)
-
-    #    if not check_utf8(req.path_info):
-    #        res = HTTPPreconditionFailed(body='Invalid UTF8 or contains NULL')
-    #    else:
-    #        try:
-    #            # disallow methods which have not been marked 'public'
-    #            try:
-    #                method = getattr(self, req.method)
-    #                getattr(method, 'publicly_accessible')
-    #            except AttributeError:
-    #                res = HTTPMethodNotAllowed()
-    #            else:
-    #                res = method(req)
-    #        except (Exception, Timeout):
-    #            self.logger.exception(_(
-    #                'ERROR __call__ error with %(method)s'
-    #                ' %(path)s '), {'method': req.method, 'path': req.path})
-    #            res = HTTPInternalServerError(body=traceback.format_exc())
-    #    trans_time = time.time() - start_time
-    #    if req.method in ('PUT', 'DELETE'):
-    #        slow = self.slow - trans_time
-    #        if slow > 0:
-    #            sleep(slow)
-    #    return res(env, start_response)
-
-
 # XXX Not sure if it even makes sense to inherit if we get plugins loaded
 # from files eventually. Maybe organize some kind of lfs_utils.py instead?
 # XXX Calling this "plugin" doesn't feel right. Maybe "entity"?
@@ -1678,12 +1748,15 @@ class LFSPlugin(object):
     # Methods that plugins implement (how to do abstract methods in Python?)
     # Not every method is applicable to every plugin kind, e.g. delete_object
     # applies to containers only. Obvious, but mind it.
-    #  __init__(self, app, account, container, obj)
+    #  __init__(self, app, account, container, obj, keep_data_fp)
     #    The app must be a Swift app, with app.conf, app.logger and the like.
+    #    The keep_data_fp is needed because GET calls __iter__ that makes
+    #    this assumption. Maybe replace with an arming call? XXX
     #  exists(self)
     #    Return True is object exists. Since tombstoning is an implementation,
     #    we do not have is_deleted().
     #  initialize(self, timestamp) -- XXX return an error if failed
+    #    LFS calls this for objects as well as accounts and containers.
     #  get_into(self)
     #    Return the dict with the properties, same as legacy.
     #  #get_container_timestamp(self)
@@ -1700,9 +1773,10 @@ class LFSPlugin(object):
     #                obj_count, bytes_used)
     #  #put_object(self, name, timestamp, size, content_type, etag, deleted=0)
     #  #list_objects_iter(self, limit,marker,end_marker,prefix,delimiter,path)
-    #  #__call__(self) - to be assigned to Request.app_iter
+    #  __iter__(self) - to be assigned to Request.app_iter
     #    It seems that swob essentially requires the supplied callable of GET
     #    to be a class, because it checks for hasattr('app_iter_ranges').
+    #  close(self)
     #  #app_iter_ranges(self, ....)
     #  #delete_object(self, name, timestamp)
     #  mkstemp(self)
@@ -1711,6 +1785,8 @@ class LFSPlugin(object):
     #  put(self, fd, metadata)
     #    Aping DiskFile again. May change API when we get rid of fd.
     #  unlinkold(self, timestamp)
+    #  get_data_file_size(self)
+    #  quarantine(self)
     # Properties that plugins implement
     #  metadata
     #    The metadata property must be accessed for lookup only. We may

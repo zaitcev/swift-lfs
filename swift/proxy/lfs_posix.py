@@ -14,12 +14,20 @@
 # limitations under the License.
 
 import cPickle as pickle
+import errno
 import os
 import xattr
 
 from contextlib import contextmanager
+from hashlib import md5
+from tempfile import mkstemp
 
-from swift.common.utils import (normalize_timestamp, renamer)
+# XXX get rid of exceptions or find a way to define them for LFS plugins
+from swift.common.exceptions import (DiskFileError, DiskFileNotExist)
+from swift.common.utils import (mkdirs, normalize_timestamp, renamer)
+
+DISALLOWED_HEADERS = set('content-length content-type deleted etag'.split())
+X_CONTENT_LENGTH = 'Content-Length'
 
 
 METADATA_KEY = 'user.swift.metadata'
@@ -39,6 +47,17 @@ def read_metadata(path):
             key += 1
     except IOError:
         pass
+    # Swift's normal Object server does not check for no metadata.
+    # But in our case it's possible to get p-broker initialized first,
+    # which implies trying to read metadata, before .initialize() is called.
+    # Therefore, avoid EOFError exception.
+    if len(metadata) == 0:
+        return {}
+    return pickle.loads(metadata)
+
+def read_meta_file(path):
+    with open(path, "r") as fp:
+        metadata = fp.read()
     return pickle.loads(metadata)
 
 def write_metadata(path, metadata):
@@ -49,10 +68,14 @@ def write_metadata(path, metadata):
         metastr = metastr[254:]
         key += 1
 
+def write_meta_file(path, metadata):
+    metastr = pickle.dumps(metadata, PICKLE_PROTOCOL)
+    with open(path, "w") as fp:
+        fp.write(metastr)
 
 # XXX How about implementing a POSIX pbroker that does not use xattr?
 class LFSPluginPosix():
-    def __init__(self, app, account, container, obj):
+    def __init__(self, app, account, container, obj, keep_data_fp):
         if obj:
             path = os.path.join(app.lfs_root, account, container, obj)
             self._type = 0 # like port 6010
@@ -64,14 +87,65 @@ class LFSPluginPosix():
             self._type = 2 # like port 6012
         # P3
         fp = open("/tmp/dump","a")
-        print >>fp, "posix path", path
+        print >>fp, "posix __init__ type", self._type, "path", path
         fp.close()
         self.datadir = path
-        if os.path.exists(path):
-            self.metadata = read_metadata(path)
-        else:
-            self.metadata = {}
+        self.tmpdir = os.path.join(app.lfs_root, "tmp")
         self.tmppath = None
+        self.data_file = None
+        self.meta_file = None
+        self.fp = None
+
+        self.started_at_0 = False
+        self.read_to_eof = False
+        self.iter_etag = None
+        self.disk_chunk_size = 128*1024
+
+        if not os.path.exists(self.datadir):
+            self.metadata = {}
+            # P3
+            fp = open("/tmp/dump","a")
+            print >>fp, "posix __init__ not exist"
+            fp.close()
+            return
+
+        files = sorted(os.listdir(self.datadir), reverse=True)
+        for file in files:
+            if file.endswith('.ts'):
+                self.data_file = self.meta_file = None
+                self.metadata = {'deleted': True}
+                # P3
+                fp = open("/tmp/dump","a")
+                print >>fp, "posix __init__ deleted"
+                fp.close()
+                return
+            if file.endswith('.meta') and not self.meta_file:
+                self.meta_file = os.path.join(self.datadir, file)
+            if file.endswith('.data') and not self.data_file:
+                self.data_file = os.path.join(self.datadir, file)
+            if self.meta_file and self.data_file:
+                break
+        if not self.data_file:
+            # P3
+            fp = open("/tmp/dump","a")
+            print >>fp, "posix __init__ no data"
+            fp.close()
+            return
+        if not self.meta_file:
+            # P3
+            fp = open("/tmp/dump","a")
+            print >>fp, "posix __init__ no meta"
+            fp.close()
+            return
+
+        self.metadata = read_meta_file(self.meta_file)
+        # P3
+        fp = open("/tmp/dump","a")
+        print >>fp, "posix __init__ ETag", self.metadata.get('ETag')
+        fp.close()
+
+        if keep_data_fp:
+            self.fp = open(self.data_file, 'rb')
 
     def exists(self):
         # The conventional Swift tries to distinguish between a valid account
@@ -84,12 +158,20 @@ class LFSPluginPosix():
         # Junaid tries Exception and checkes for err.errno!=errno.EEXIST, but
         # in theory this should not be necessary if we implement the broker
         # protocol properly (Junaid's code has an empty initialize()).
+        # P3
+        fp = open("/tmp/dump","a")
+        print >>fp, "posix initialize path", self.datadir, "ts", timestamp
+        fp.close()
         os.makedirs(self.datadir)
         #xattr.set(self.datadir, STATUS_KEY, 'OK')
         # Keeping stats counts in EA must be ridiculously inefficient. XXX
         if self._type == 2:
             xattr.set(self.datadir, CONTCNT_KEY, str(0))
-        write_metadata(self.datadir, self.metadata)
+            write_metadata(self.datadir, self.metadata)
+        elif self._type == 1:
+            write_metadata(self.datadir, self.metadata)
+        else:
+            pass
         ts = int(float(timestamp))
         os.utime(self.datadir, (ts, ts))
 
@@ -155,12 +237,13 @@ class LFSPluginPosix():
         return results
 
     def update_metadata(self, metadata):
-        if metadata:
-            new_metadata = self.metadata.copy()
-            new_metadata.update(metadata)
-            if new_metadata != self.metadata:
-                write_metadata(self.datadir, new_metadata)
-                self.metadata = new_metadata
+        if self._type != 0:
+            if metadata:
+                new_metadata = self.metadata.copy()
+                new_metadata.update(metadata)
+                if new_metadata != self.metadata:
+                    write_metadata(self.datadir, new_metadata)
+                    self.metadata = new_metadata
 
     def update_put_timestamp(self, timestamp):
         ts = int(float(timestamp))
@@ -185,11 +268,9 @@ class LFSPluginPosix():
     def mkstemp(self):
         """Contextmanager to make a temporary file."""
 
-        # XXX Bad Zaitcev, no cookie. Create in tmpdir=self.lfs_root/tmp
-        #if not os.path.exists(self.tmpdir):
-        #    mkdirs(self.tmpdir)
-        #fd, self.tmppath = mkstemp(dir=self.tmpdir)
-        fd, self.tmppath = mkstemp(dir=self.datadir)
+        if not os.path.exists(self.tmpdir):
+            mkdirs(self.tmpdir)
+        fd, self.tmppath = mkstemp(dir=self.tmpdir)
         try:
             yield fd
         finally:
@@ -204,7 +285,7 @@ class LFSPluginPosix():
                 pass
 
     # In our case we don't actually use fd for anything.
-    # XXX wanted? :param extension: extension to be used when making the file
+    # We do not have the "extension" parameter for LFS to allow for meta file.
     def put(self, fd, metadata):
         """
         Finalize writing the file on disk, and renames it from the temp file to
@@ -218,13 +299,153 @@ class LFSPluginPosix():
         # wait, what?
         #metadata['name'] = self.name
         timestamp = normalize_timestamp(metadata['X-Timestamp'])
-        write_metadata(self.tmppath, metadata)
+        base_path = os.path.join(self.datadir, timestamp)
+        # P3
+        fp = open("/tmp/dump","a")
+        print >>fp, "posix put old", self.tmppath, "new", base_path
+        fp.close()
+        write_meta_file(base_path + '.meta', metadata)
         #if 'Content-Length' in metadata:
         #    self.drop_cache(fd, 0, int(metadata['Content-Length']))
         # XXX os.fsync maybe?
         #tpool.execute(fsync, fd)
-        #renamer(self.tmppath,
-        #        os.path.join(self.datadir, timestamp + extension))
-        renamer(self.tmppath,
-                os.path.join(self.datadir, timestamp))
+        renamer(self.tmppath, base_path + ".data")
+        # but not setting self.data_file here, is this right?
         self.metadata = metadata
+
+    def _handle_close_quarantine(self):
+        """Check if file needs to be quarantined"""
+        try:
+            self.get_data_file_size()
+        except DiskFileError:
+            self.quarantine()
+            return
+        except DiskFileNotExist:
+            return
+
+        if self.iter_etag and self.started_at_0 and self.read_to_eof and \
+                'ETag' in self.metadata and \
+                self.iter_etag.hexdigest() != self.metadata.get('ETag'):
+            self.quarantine()
+        return
+
+    def __iter__(self):
+        """Returns an iterator over the data file."""
+        try:
+            #dropped_cache = 0
+            read = 0
+            self.started_at_0 = False
+            self.read_to_eof = False
+            if self.fp.tell() == 0:
+                self.started_at_0 = True
+                self.iter_etag = md5()
+            while True:
+                chunk = self.fp.read(self.disk_chunk_size)
+                if chunk:
+                    if self.iter_etag:
+                        self.iter_etag.update(chunk)
+                    read += len(chunk)
+                    #if read - dropped_cache > (1024 * 1024):
+                    #    self.drop_cache(self.fp.fileno(), dropped_cache,
+                    #                    read - dropped_cache)
+                    #    dropped_cache = read
+                    yield chunk
+                else:
+                    self.read_to_eof = True
+                    #self.drop_cache(self.fp.fileno(), dropped_cache,
+                    #                read - dropped_cache)
+                    break
+        finally:
+        #    if not self.suppress_file_closing:
+        #        self.close()
+            pass
+
+    def close(self, verify_file=True):
+        """
+        Close the file. Will handle quarantining file if necessary.
+
+        :param verify_file: Defaults to True. If false, will not check
+                            file to see if it needs quarantining.
+        """
+        if self.fp:
+            try:
+                if verify_file:
+                    self._handle_close_quarantine()
+            except (Exception, Timeout), e:
+                self.logger.error(_(
+                    'ERROR DiskFile %(data_file)s in '
+                    '%(data_dir)s close failure: %(exc)s : %(stack)'),
+                    {'exc': e, 'stack': ''.join(traceback.format_stack()),
+                     'data_file': self.data_file, 'data_dir': self.datadir})
+            finally:
+                self.fp.close()
+                self.fp = None
+
+    def unlinkold(self, timestamp):
+        """
+        Remove any older versions of the object file.  Any file that has an
+        older timestamp than timestamp will be deleted.
+
+        :param timestamp: timestamp to compare with each file
+        """
+        if not self.metadata or self.metadata['X-Timestamp'] >= timestamp:
+            return
+
+        assert self.data_file, \
+            "Have metadata, %r, but no data_file" % self.metadata
+
+        # XXX Scan the datadir and actually delete all old versions per docstr
+        do_unlink(self.data_file)
+        do_unlink(self.meta_file)
+
+        self.metadata = {}
+        self.data_file = None
+        self.meta_file = None
+
+    def get_data_file_size(self):
+        """
+        Returns the os.path.getsize for the file.  Raises an exception if this
+        file does not match the Content-Length stored in the metadata. Or if
+        self.data_file does not exist.
+
+        :returns: file size as an int
+        :raises DiskFileError: on file size mismatch.
+        :raises DiskFileNotExist: on file not existing (including deleted)
+        """
+        try:
+            file_size = 0
+            if self.data_file:
+                file_size = os.path.getsize(self.data_file)
+                if 'Content-Length' in self.metadata:
+                    metadata_size = int(self.metadata['Content-Length'])
+                    if file_size != metadata_size:
+                        raise DiskFileError(
+                            'Content-Length of %s does not match file size '
+                            'of %s' % (metadata_size, file_size))
+                return file_size
+        except OSError, err:
+            if err.errno != errno.ENOENT:
+                raise
+        raise DiskFileNotExist('Data File does not exist.')
+
+    def quarantine(self):
+        """
+        In the case that a file is corrupted, move it to a quarantined
+        area to allow replication to fix it.
+
+        :returns: if quarantine is successful, path to quarantined
+                  directory otherwise None
+        """
+        #from swift.obj.replicator quarantine_renamer, get_hashes
+        #if not (self.is_deleted() or self.quarantined_dir):
+        #    self.quarantined_dir = quarantine_renamer(self.device_path,
+        #                                              self.data_file)
+        #    self.logger.increment('quarantines')
+        #    return self.quarantined_dir
+
+        # stub for now XXX
+        # P3
+        fp = open("/tmp/dump","a")
+        print >>fp, "posix quarantine", self.data_file + ".quar"
+        fp.close()
+        renamer(self.data_file, self.data_file + ".quar")
