@@ -84,7 +84,10 @@ class CNAMELookupMiddleware(object):
     def __call__(self, env, start_response):
         if not self.storage_domain:
             return self.app(env, start_response)
-        given_domain = env['HTTP_HOST']
+        if 'HTTP_HOST' in env:
+            given_domain = env['HTTP_HOST']
+        else:
+            given_domain = env['SERVER_NAME']
         port = ''
         if ':' in given_domain:
             given_domain, port = given_domain.rsplit(':', 1)
@@ -105,7 +108,7 @@ class CNAMELookupMiddleware(object):
                     if self.memcache:
                         memcache_key = ''.join(['cname-', given_domain])
                         self.memcache.set(memcache_key, found_domain,
-                                          timeout=ttl)
+                                          time=ttl)
                 if found_domain is None or found_domain == a_domain:
                     # no CNAME records or we're at the last lookup
                     error = True

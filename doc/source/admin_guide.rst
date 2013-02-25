@@ -208,6 +208,7 @@ configuration file, /etc/swift/dispersion.conf. Example conf file::
     auth_url = http://localhost:8080/auth/v1.0
     auth_user = test:tester
     auth_key = testing
+    endpoint_type = internalURL
 
 There are also options for the conf file for specifying the dispersion coverage
 (defaults to 1%), retries, concurrency, etc. though usually the defaults are
@@ -353,7 +354,7 @@ Request URI                 Description
 /recon/sockstat             returns consumable info from /proc/net/sockstat|6
 /recon/devices              returns list of devices and devices dir i.e. /srv/node
 /recon/async                returns count of async pending
-/recon/replication          returns object replication times (for backward compatability)
+/recon/replication          returns object replication times (for backward compatibility)
 /recon/replication/<type>   returns replication info for given type (account, container, object)
 /recon/auditor/<type>       returns auditor stats on last reported scan for given type (account, container, object)
 /recon/updater/<type>       returns last updater sweep times for given type (container, object)
@@ -415,7 +416,8 @@ configuration entries (see the sample configuration files)::
 
     log_statsd_host = localhost
     log_statsd_port = 8125
-    log_statsd_default_sample_rate = 1
+    log_statsd_default_sample_rate = 1.0
+    log_statsd_sample_rate_factor = 1.0
     log_statsd_metric_prefix =                [empty-string]
 
 If `log_statsd_host` is not set, this feature is disabled.  The default values
@@ -430,9 +432,24 @@ probability of sending a sample for any given event or timing measurement.
 This sample rate is sent with each sample to StatsD and used to
 multiply the value.  For example, with a sample rate of 0.5, StatsD will
 multiply that counter's value by 2 when flushing the metric to an upstream
-monitoring system (Graphite_, Ganglia_, etc.).  To get the best data, start
-with the default `log_statsd_default_sample_rate` value of 1 and only lower
-it as needed.
+monitoring system (Graphite_, Ganglia_, etc.).
+
+Some relatively high-frequency metrics have a default sample rate less than
+one.  If you want to override the default sample rate for all metrics whose
+default sample rate is not specified in the Swift source, you may set
+`log_statsd_default_sample_rate` to a value less than one.  This is NOT
+recommended (see next paragraph).  A better way to reduce StatsD load is to
+adjust `log_statsd_sample_rate_factor` to a value less than one.  The
+`log_statsd_sample_rate_factor` is multiplied to any sample rate (either the
+global default or one specified by the actual metric logging call in the Swift
+source) prior to handling.  In other words, this one tunable can lower the
+frequency of all StatsD logging by a proportional amount.
+
+To get the best data, start with the default `log_statsd_default_sample_rate`
+and `log_statsd_sample_rate_factor` values of 1 and only lower
+`log_statsd_sample_rate_factor` if needed.  The
+`log_statsd_default_sample_rate` should not be used and remains for backward
+compatibility only.
 
 The metric prefix will be prepended to every metric sent to the StatsD server
 For example, with::
@@ -445,13 +462,14 @@ servers when sending statistics to a central StatsD server.  If you run a local
 StatsD server per node, you could configure a per-node metrics prefix there and
 leave `log_statsd_metric_prefix` blank.
 
-Note that metrics reported to StatsD are counters or timing data (which
-StatsD usually expands out to min, max, avg, count, and 90th percentile
-per timing metric).  Some important "gauge" metrics will still need to
-be collected using another method.  For example, the
-`object-server.async_pendings` StatsD metric counts the generation of
-async_pendings in real-time, but will not tell you the current number
-of async_pending container updates on disk at any point in time.
+Note that metrics reported to StatsD are counters or timing data (which are
+sent in units of milliseconds).  StatsD usually expands timing data out to min,
+max, avg, count, and 90th percentile per timing metric, but the details of
+this behavior will depend on the configuration of your StatsD server.  Some
+important "gauge" metrics may still need to be collected using another method.
+For example, the `object-server.async_pendings` StatsD metric counts the generation
+of async_pendings in real-time, but will not tell you the current number of
+async_pending container updates on disk at any point in time.
 
 Note also that the set of metrics collected, their names, and their semantics
 are not locked down and will change over time.  StatsD logging is currently in
@@ -477,7 +495,7 @@ Metric Name                                     Description
 `account-reaper.errors`                         Count of devices failing the mount check.
 `account-reaper.timing`                         Timing data for each reap_account() call.
 `account-reaper.return_codes.X`                 Count of HTTP return codes from various operations
-                                                (eg. object listing, container deletion, etc.). The
+                                                (e.g. object listing, container deletion, etc.). The
                                                 value for X is the first digit of the return code
                                                 (2 for 201, 4 for 404, etc.).
 `account-reaper.containers_failures`            Count of failures to delete a container.
@@ -823,17 +841,23 @@ the default setting yields the above behavior.
 
 .. _Swift Origin Server: https://github.com/dpgoetz/sos
 
-============================================  ====================================================
-Metric Name                                   Description
---------------------------------------------  ----------------------------------------------------
-`proxy-server.<type>.<verb>.<status>.timing`  Timing data for requests.  The <status> portion is
-                                              the numeric HTTP status code for the request (eg.
-                                              "200" or "404")
-`proxy-server.<type>.<verb>.<status>.xfer`    The count of the sum of bytes transferred in (from
-                                              clients) and out (to clients) for requests.  The
-                                              <type>, <verb>, and <status> portions of the metric
-                                              are just like the timing metric.
-============================================  ====================================================
+====================================================  ============================================
+Metric Name                                           Description
+----------------------------------------------------  --------------------------------------------
+`proxy-server.<type>.<verb>.<status>.timing`          Timing data for requests, start to finish.
+                                                      The <status> portion is the numeric HTTP
+                                                      status code for the request (e.g.  "200" or
+                                                      "404").
+`proxy-server.<type>.GET.<status>.first-byte.timing`  Timing data up to completion of sending the
+                                                      response headers (only for GET requests).
+                                                      <status> and <type> are as for the main
+                                                      timing metric.
+`proxy-server.<type>.<verb>.<status>.xfer`            This counter metric is the sum of bytes
+                                                      transferred in (from clients) and out (to
+                                                      clients) for requests.  The <type>, <verb>,
+                                                      and <status> portions of the metric are just
+                                                      like the main timing metric.
+====================================================  ============================================
 
 Metrics for `tempauth` middleware (in the table, `<reseller_prefix>` represents
 the actual configured reseller_prefix or "`NONE`" if the reseller_prefix is the

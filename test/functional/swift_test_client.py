@@ -87,7 +87,7 @@ def listing_items(method):
 class Connection(object):
     def __init__(self, config):
         for key in 'auth_host auth_port auth_ssl username password'.split():
-            if not key in config:
+            if key not in config:
                 raise SkipTest
 
         self.auth_host = config['auth_host']
@@ -301,7 +301,7 @@ class Base:
         headers = dict(self.conn.response.getheaders())
         ret = {}
         for field in fields:
-            if not field[1] in headers:
+            if field[1] not in headers:
                 raise ValueError("%s was not found in response header" %
                                  (field[1]))
 
@@ -717,15 +717,15 @@ class File(Base):
 
         self.conn.put_start(self.path, hdrs=headers, parms=parms, cfg=cfg)
 
-        transfered = 0
+        transferred = 0
         buff = data.read(block_size)
         try:
             while len(buff) > 0:
                 self.conn.put_data(buff)
                 buff = data.read(block_size)
-                transfered += len(buff)
+                transferred += len(buff)
                 if callable(callback):
-                    callback(transfered, self.size)
+                    callback(transferred, self.size)
 
             self.conn.put_end()
         except socket.timeout, err:

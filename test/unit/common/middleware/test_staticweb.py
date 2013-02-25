@@ -33,11 +33,11 @@ class FakeMemcache(object):
     def get(self, key):
         return self.store.get(key)
 
-    def set(self, key, value, timeout=0):
+    def set(self, key, value, time=0):
         self.store[key] = value
         return True
 
-    def incr(self, key, timeout=0):
+    def incr(self, key, time=0):
         self.store[key] = self.store.setdefault(key, 0) + 1
         return self.store[key]
 
@@ -623,33 +623,6 @@ class TestStaticWeb(unittest.TestCase):
         self.assertEquals(resp.headers['x-object-meta-test'], 'value')
         self.assertEquals(resp.body, '1')
         self.assertEquals(self.app.calls, 1)
-
-    def test_log_headers(self):
-        # Using a listing request since we know that calls StaticWeb's logging
-        # routines
-        self.test_staticweb.access_logger = FakeLogger()
-        self.test_staticweb.log_headers = True
-        req = Request.blank('/v1/a/c3/subdir/',
-                            headers={'test-header': 'test-value'})
-        resp = req.get_response(self.test_staticweb)
-        self.assertEquals(resp.status_int, 200)
-        self.assert_('Listing of /v1/a/c3/subdir/' in resp.body)
-        infos = self.test_staticweb.access_logger.log_dict['info']
-        self.assertEquals(len(infos), 1)
-        info = infos[0][0][0]
-        self.assertTrue('Test-Header%3A%20test-value' in info, repr(info))
-
-        self.test_staticweb.access_logger = FakeLogger()
-        self.test_staticweb.log_headers = False
-        req = Request.blank('/v1/a/c3/subdir/',
-                            headers={'test-header': 'test-value'})
-        resp = req.get_response(self.test_staticweb)
-        self.assertEquals(resp.status_int, 200)
-        self.assert_('Listing of /v1/a/c3/subdir/' in resp.body)
-        infos = self.test_staticweb.access_logger.log_dict['info']
-        self.assertEquals(len(infos), 1)
-        info = infos[0][0][0]
-        self.assertTrue('Test-Header%3A%20test-value' not in info, repr(info))
 
 
 if __name__ == '__main__':

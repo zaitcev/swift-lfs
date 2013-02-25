@@ -49,12 +49,12 @@ class Bulk(object):
     Extract Archive:
 
     Expand tar files into a swift account. Request must be a PUT with the
-    header X-Extract-Archive specifying the format of archive file. Accepted
-    formats are tar, tar.gz, and tar.bz2.
+    query parameter ?extract-archive=format specifying the format of archive
+    file. Accepted formats are tar, tar.gz, and tar.bz2.
 
     For a PUT to the following url:
 
-    /v1/AUTH_Account/$UPLOAD_PATH
+    /v1/AUTH_Account/$UPLOAD_PATH?extract-archive=tar.gz
 
     UPLOAD_PATH is where the files will be expanded to. UPLOAD_PATH can be a
     container, a pseudo-directory within a container, or an empty string. The
@@ -79,24 +79,43 @@ class Bulk(object):
     Acceptable formats are text/plain, application/json, application/xml, and
     text/xml.
 
+    There are proxy logs created for each file (which becomes a subrequest) in
+    the tar. The subrequest's proxy log will have a swift.source set to "EA"
+    the log's content length will reflect the unzipped size of the file. If
+    double proxy-logging is used the leftmost logger will not have a
+    swift.source set and the content length will reflect the size of the
+    payload sent to the proxy (the unexpanded size of the tar.gz).
+
     Bulk Delete:
 
-    Will delete multiple objects from their account with a single request.
-    Responds to DELETE requests with a header 'X-Bulk-Delete: true'.
-    The Content-Type should be set to text/plain. The body of the DELETE
-    request will be a newline separated list of url encoded objects to delete.
-    You can only delete 1000 (configurable) objects per request. The objects
-    specified in the DELETE request body must be URL encoded and in the form:
+    Will delete multiple objects or containers from their account with a
+    single request. Responds to DELETE requests with query parameter
+    ?bulk-delete set. The Content-Type should be set to text/plain.
+    The body of the DELETE request will be a newline separated list of url
+    encoded objects to delete. You can only delete 1000 (configurable) objects
+    per request. The objects specified in the DELETE request body must be URL
+    encoded and in the form:
 
     /container_name/obj_name
 
-    If all objects were successfully deleted (or did not exist), will return an
-    HTTPOk. If any objects failed to delete, will return an HTTPBadGateway. In
-    both cases the response body will specify the number of objects
-    successfully deleted, not found, and a list of the objects that failed.
+    or for a container (which must be empty at time of delete)
+
+    /container_name
+
+    If all items were successfully deleted (or did not exist), will return an
+    HTTPOk. If any failed to delete, will return an HTTPBadGateway. In
+    both cases the response body will specify the number of items
+    successfully deleted, not found, and a list of those that failed.
     The return body will be formatted in the way specified in the request's
     Accept header. Acceptable formats are text/plain, application/json,
-    apllication/xml, and text/xml.
+    application/xml, and text/xml.
+
+    There are proxy logs created for each object or container (which becomes a
+    subrequest) that is deleted. The subrequest's proxy log will have a
+    swift.source set to "BD" the log's content length of 0. If double
+    proxy-logging is used the leftmost logger will not have a
+    swift.source set and the content length will reflect the size of the
+    payload sent to the proxy (the list of objects/containers to be deleted).
     """
 
     def __init__(self, app, conf):
@@ -117,6 +136,7 @@ class Bulk(object):
         """
         new_env = req.environ.copy()
         new_env['PATH_INFO'] = container_path
+        new_env['swift.source'] = 'EA'
         create_cont_req = Request.blank(container_path, environ=new_env)
         resp = create_cont_req.get_response(self.app)
         if resp.status_int // 100 != 2:
@@ -231,6 +251,7 @@ class Bulk(object):
             new_env['CONTENT_LENGTH'] = 0
             new_env['HTTP_USER_AGENT'] = \
                 '%s BulkDelete' % req.environ.get('HTTP_USER_AGENT')
+            new_env['swift.source'] = 'BD'
             delete_obj_req = Request.blank(delete_path, new_env)
             resp = delete_obj_req.get_response(self.app)
             if resp.status_int // 100 == 2:
@@ -337,6 +358,7 @@ class Bulk(object):
                     new_env['wsgi.input'] = tar_file
                     new_env['PATH_INFO'] = destination
                     new_env['CONTENT_LENGTH'] = tar_info.size
+                    new_env['swift.source'] = 'EA'
                     new_env['HTTP_USER_AGENT'] = \
                         '%s BulkExpand' % req.environ.get('HTTP_USER_AGENT')
                     create_obj_req = Request.blank(destination, new_env)
@@ -364,17 +386,16 @@ class Bulk(object):
 
     @wsgify
     def __call__(self, req):
-        extract_type = \
-            req.headers.get('X-Extract-Archive', '').lower().strip('.')
-        if extract_type and req.method == 'PUT':
-            archive_type = {'tar': '', 'tar.gz': 'gz',
-                            'tar.bz2': 'bz2'}.get(extract_type)
+        extract_type = req.params.get('extract-archive')
+        if extract_type is not None and req.method == 'PUT':
+            archive_type = {
+                'tar': '', 'tar.gz': 'gz',
+                'tar.bz2': 'bz2'}.get(extract_type.lower().strip('.'))
             if archive_type is not None:
                 return self.handle_extract(req, archive_type)
             else:
                 return HTTPBadRequest("Unsupported archive format")
-        if (req.headers.get('X-Bulk-Delete', '').lower() in TRUE_VALUES and
-                req.method == 'DELETE'):
+        if 'bulk-delete' in req.params and req.method == 'DELETE':
             return self.handle_delete(req)
 
         return self.app

@@ -357,11 +357,11 @@ class FakeMemcache(object):
     def keys(self):
         return self.store.keys()
 
-    def set(self, key, value, timeout=0):
+    def set(self, key, value, time=0):
         self.store[key] = value
         return True
 
-    def incr(self, key, timeout=0):
+    def incr(self, key, time=0):
         self.store[key] = self.store.setdefault(key, 0) + 1
         return self.store[key]
 
@@ -962,7 +962,7 @@ class TestObjectController(unittest.TestCase):
         listing3 = [{"hash": "6605f80e3cefaa24e9823544df4edbd6",
                      "last_modified": "2012-11-08T04:05:37.853710",
                      "bytes": 2,
-                     "name": "seg05",
+                     "name": u'\N{SNOWMAN}seg05',
                      "content_type": "application/octet-stream"}]
 
         response_bodies = (
@@ -1028,9 +1028,10 @@ class TestObjectController(unittest.TestCase):
                      ['GET', '/a/segments/seg04', {}],
                      ['GET', '/a/segments',
                       {'format': 'json', 'prefix': 'seg', 'marker': 'seg04'}],
-                     ['GET', '/a/segments/seg05', {}],
+                     ['GET', '/a/segments/\xe2\x98\x83seg05', {}],
                      ['GET', '/a/segments',
-                      {'format': 'json', 'prefix': 'seg', 'marker': 'seg05'}]])
+                      {'format': 'json', 'prefix': 'seg',
+                       'marker': '\xe2\x98\x83seg05'}]])
 
             finally:
                 # other tests in this file get very unhappy if this
@@ -1461,7 +1462,7 @@ class TestObjectController(unittest.TestCase):
             limit = MAX_META_OVERALL_SIZE
             controller = proxy_server.ObjectController(self.app, 'account',
                                                        'container', 'object')
-            count = limit / 256  # enough to cause the limit to be reched
+            count = limit / 256  # enough to cause the limit to be reached
             headers = dict(
                 (('X-Object-Meta-' + str(i), 'a' * 256)
                     for i in xrange(count + 1)))

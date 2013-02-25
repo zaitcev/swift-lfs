@@ -35,6 +35,7 @@ from shutil import rmtree
 from StringIO import StringIO
 from functools import partial
 from tempfile import TemporaryFile, NamedTemporaryFile
+from logging import handlers as logging_handlers
 
 from eventlet import sleep
 
@@ -146,6 +147,36 @@ class TestUtils(unittest.TestCase):
                           "1253327593.00000")
         self.assertRaises(ValueError, utils.normalize_timestamp, '')
         self.assertRaises(ValueError, utils.normalize_timestamp, 'abc')
+
+    def test_backwards(self):
+        """ Test swift.common.utils.backward """
+
+        # The lines are designed so that the function would encounter
+        # all of the boundary conditions and typical conditions.
+        # Block boundaries are marked with '<>' characters
+        blocksize = 25
+        lines = ['123456789x12345678><123456789\n',  # block larger than rest
+                 '123456789x123>\n',  # block ends just before \n character
+                 '123423456789\n',
+                 '123456789x\n',  # block ends at the end of line
+                 '<123456789x123456789x123\n',
+                 '<6789x123\n',  # block ends at the beginning of the line
+                 '6789x1234\n',
+                 '1234><234\n',  # block ends typically in the middle of line
+                 '123456789x123456789\n']
+
+        with TemporaryFile('r+w') as f:
+            for line in lines:
+                f.write(line)
+
+            count = len(lines) - 1
+            for line in utils.backward(f, blocksize):
+                self.assertEquals(line, lines[count].split('\n')[0])
+                count -= 1
+
+        # Empty file case
+        with TemporaryFile('r') as f:
+            self.assertEquals([], list(utils.backward(f)))
 
     def test_mkdirs(self):
         testroot = os.path.join(os.path.dirname(__file__), 'mkdirs')
@@ -302,7 +333,7 @@ class TestUtils(unittest.TestCase):
         lfo.tell()
 
     def test_parse_options(self):
-        # use mkstemp to get a file that is definately on disk
+        # use mkstemp to get a file that is definitely on disk
         with NamedTemporaryFile() as f:
             conf_file = f.name
             conf, options = utils.parse_options(test_args=[conf_file])
@@ -377,6 +408,62 @@ class TestUtils(unittest.TestCase):
         logger.notice('test6')
         self.assertEquals(sio.getvalue(),
                           'test1\ntest3\ntest4\ntest6\n')
+
+    def test_get_logger_sysloghandler_plumbing(self):
+        orig_sysloghandler = utils.SysLogHandler
+        syslog_handler_args = []
+        def syslog_handler_catcher(*args, **kwargs):
+            syslog_handler_args.append((args, kwargs))
+            return orig_sysloghandler(*args, **kwargs)
+        syslog_handler_catcher.LOG_LOCAL0 = orig_sysloghandler.LOG_LOCAL0
+        syslog_handler_catcher.LOG_LOCAL3 = orig_sysloghandler.LOG_LOCAL3
+
+        try:
+            utils.SysLogHandler = syslog_handler_catcher
+            logger = utils.get_logger({
+                'log_facility': 'LOG_LOCAL3',
+            }, 'server', log_route='server')
+            self.assertEquals([
+                ((), {'address': '/dev/log',
+                      'facility': orig_sysloghandler.LOG_LOCAL3})],
+                syslog_handler_args)
+
+            syslog_handler_args = []
+            logger = utils.get_logger({
+                'log_facility': 'LOG_LOCAL3',
+                'log_address': '/foo/bar',
+            }, 'server', log_route='server')
+            self.assertEquals([
+                ((), {'address': '/foo/bar',
+                      'facility': orig_sysloghandler.LOG_LOCAL3}),
+                # Second call is because /foo/bar didn't exist (and wasn't a
+                # UNIX domain socket).
+                ((), {'facility': orig_sysloghandler.LOG_LOCAL3})],
+                syslog_handler_args)
+
+            # Using UDP with default port
+            syslog_handler_args = []
+            logger = utils.get_logger({
+                'log_udp_host': 'syslog.funtimes.com',
+            }, 'server', log_route='server')
+            self.assertEquals([
+                ((), {'address': ('syslog.funtimes.com',
+                                  logging.handlers.SYSLOG_UDP_PORT),
+                      'facility': orig_sysloghandler.LOG_LOCAL0})],
+                syslog_handler_args)
+
+            # Using UDP with non-default port
+            syslog_handler_args = []
+            logger = utils.get_logger({
+                'log_udp_host': 'syslog.funtimes.com',
+                'log_udp_port': '2123',
+            }, 'server', log_route='server')
+            self.assertEquals([
+                ((), {'address': ('syslog.funtimes.com', 2123),
+                      'facility': orig_sysloghandler.LOG_LOCAL0})],
+                syslog_handler_args)
+        finally:
+            utils.SysLogHandler = orig_sysloghandler
 
     def test_clean_logger_exception(self):
         # setup stream logging
@@ -1101,8 +1188,9 @@ class TestStatsdLogging(unittest.TestCase):
     def test_get_logger_statsd_client_non_defaults(self):
         logger = utils.get_logger({
             'log_statsd_host': 'another.host.com',
-            'log_statsd_port': 9876,
-            'log_statsd_default_sample_rate': 0.75,
+            'log_statsd_port': '9876',
+            'log_statsd_default_sample_rate': '0.75',
+            'log_statsd_sample_rate_factor': '0.81',
             'log_statsd_metric_prefix': 'tomato.sauce',
         }, 'some-name', log_route='some-route')
         self.assertEqual(logger.logger.statsd_client._prefix,
@@ -1116,6 +1204,8 @@ class TestStatsdLogging(unittest.TestCase):
         self.assertEqual(logger.logger.statsd_client._port, 9876)
         self.assertEqual(logger.logger.statsd_client._default_sample_rate,
                          0.75)
+        self.assertEqual(logger.logger.statsd_client._sample_rate_factor,
+                         0.81)
 
     def test_sample_rates(self):
         logger = utils.get_logger({'log_statsd_host': 'some.host.com'})
@@ -1138,6 +1228,42 @@ class TestStatsdLogging(unittest.TestCase):
         payload = mock_socket.sent[0][0]
         self.assertTrue(payload.endswith("|@0.5"))
 
+    def test_sample_rates_with_sample_rate_factor(self):
+        logger = utils.get_logger({
+            'log_statsd_host': 'some.host.com',
+            'log_statsd_default_sample_rate': '0.82',
+            'log_statsd_sample_rate_factor': '0.91',
+        })
+        effective_sample_rate = 0.82 * 0.91
+
+        mock_socket = MockUdpSocket()
+        # encapsulation? what's that?
+        statsd_client = logger.logger.statsd_client
+        self.assertTrue(statsd_client.random is random.random)
+
+        statsd_client._open_socket = lambda *_: mock_socket
+        statsd_client.random = lambda: effective_sample_rate + 0.001
+
+        logger.increment('tribbles')
+        self.assertEqual(len(mock_socket.sent), 0)
+
+        statsd_client.random = lambda: effective_sample_rate - 0.001
+        logger.increment('tribbles')
+        self.assertEqual(len(mock_socket.sent), 1)
+
+        payload = mock_socket.sent[0][0]
+        self.assertTrue(payload.endswith("|@%s" % effective_sample_rate),
+                       payload)
+
+        effective_sample_rate = 0.587 * 0.91
+        statsd_client.random = lambda: effective_sample_rate - 0.001
+        logger.increment('tribbles', sample_rate=0.587)
+        self.assertEqual(len(mock_socket.sent), 2)
+
+        payload = mock_socket.sent[1][0]
+        self.assertTrue(payload.endswith("|@%s" % effective_sample_rate),
+                       payload)
+
     def test_timing_stats(self):
         class MockController(object):
             def __init__(self, status):
@@ -1150,7 +1276,7 @@ class TestStatsdLogging(unittest.TestCase):
                 self.called = 'timing'
                 self.args = args
 
-        @utils.timing_stats
+        @utils.timing_stats()
         def METHOD(controller):
             return Response(status=controller.status)
 
