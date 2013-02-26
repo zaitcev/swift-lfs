@@ -249,10 +249,6 @@ class LFSAccountController(Controller):
         ret.charset = 'utf-8'
         return ret
 
-    # XXX later
-    # @public
-    # def POST(self, req):
-
     @public
     def PUT(self, req):
         """Handle HTTP PUT request."""
@@ -279,9 +275,14 @@ class LFSAccountController(Controller):
             pbroker.update_put_timestamp(timestamp)
             if not pbroker.exists():
                 return HTTPConflict(request=req)
+
+        # What does this transfer actually do? Maybe just add the timestamp...
+        headers = {'X-Timestamp': timestamp}
+        self.transfer_headers(req.headers, headers)
+
         metadata = {}
         metadata.update((key, (value, timestamp))
-                        for key, value in req.headers.iteritems()
+                        for key, value in headers.iteritems()
                         if key.lower().startswith('x-account-meta-'))
         if metadata:
             pbroker.update_metadata(metadata)
@@ -289,6 +290,44 @@ class LFSAccountController(Controller):
             return HTTPCreated(request=req)
         else:
             return HTTPAccepted(request=req)
+
+    # POST to Account is only documented in CF Dev. Guide generally (7.7).
+    # Is it supposed to return Created at all or only NoData always?
+    @public
+    def POST(self, req):
+        """HTTP POST request handler."""
+        try:
+            v1, account = split_path(unquote(req.path), 2, 2)
+        except ValueError, err:
+            return HTTPBadRequest(body=str(err), content_type='text/plain',
+                                  request=req)
+        #if not check_mount(self.app.lfs_root, self.ufo_drive):
+        #    return HTTPInsufficientStorage(request=req)
+        #error_response = check_metadata(req, 'account')
+        #if error_response:
+        #    return error_response
+        pbroker = self.plugin_class(self.app, account, None, None, False)
+        #if self.app.memcache:
+        #    self.app.memcache.delete(
+        #        get_account_memcache_key(self.account_name))
+        timestamp = normalize_timestamp(time.time())
+        # and self.app.account_autocreate:
+        if not pbroker.exists():
+            if len(self.account_name) > MAX_ACCOUNT_NAME_LENGTH:
+                resp = HTTPBadRequest(request=req)
+                resp.body = 'Account name length of %d longer than %d' % \
+                            (len(self.account_name), MAX_ACCOUNT_NAME_LENGTH)
+                return resp
+            pbroker.initialize(timestamp)
+        headers = {'X-Timestamp': timestamp}
+        self.transfer_headers(req.headers, headers)
+        metadata = {}
+        metadata.update((key, (value, timestamp))
+                        for key, value in headers.iteritems()
+                        if key.lower().startswith('x-account-meta-'))
+        if metadata:
+            pbroker.update_metadata(metadata)
+        return HTTPNoContent(request=req)
 
     # @public
     # def DELETE(self, req):
@@ -407,6 +446,73 @@ class LFSContainerController(Controller):
             return HTTPCreated(request=req)
         else:
             return HTTPAccepted(request=req)
+
+    #@cors_validation
+    #def POST(self, req):
+    #    """HTTP POST request handler."""
+    #    error_response = \
+    #        self.clean_acls(req) or check_metadata(req, 'container')
+    #    if error_response:
+    #        return error_response
+    #    account_partition, accounts, container_count = \
+    #        self.account_info(self.account_name,
+    #                          autocreate=self.app.account_autocreate)
+    #    if not accounts:
+    #        return HTTPNotFound(request=req)
+    #    container_partition, containers = self.app.container_ring.get_nodes(
+    #        self.account_name, self.container_name)
+    #    headers = {'X-Timestamp': normalize_timestamp(time.time()),
+    #               'x-trans-id': self.trans_id,
+    #               'Connection': 'close'}
+    #    self.transfer_headers(req.headers, headers)
+    #    if self.app.memcache:
+    #        self.app.memcache.delete(get_container_memcache_key(
+    #            self.account_name, self.container_name))
+    #    resp = self.make_requests(
+    #        req, self.app.container_ring, container_partition, 'POST',
+    #        req.path_info, [headers] * len(containers))
+    #    return resp
+
+    ## implementation at node:
+    #@public
+    #@timing_stats()
+    #def POST(self, req):
+    #    """Handle HTTP POST request."""
+    #    try:
+    #        drive, part, account, container = req.split_path(4)
+    #        validate_device_partition(drive, part)
+    #    except ValueError, err:
+    #        return HTTPBadRequest(body=str(err), content_type='text/plain',
+    #                              request=req)
+    #    if 'x-timestamp' not in req.headers or \
+    #            not check_float(req.headers['x-timestamp']):
+    #        return HTTPBadRequest(body='Missing or bad timestamp',
+    #                              request=req, content_type='text/plain')
+    #    if 'x-container-sync-to' in req.headers:
+    #        err = validate_sync_to(req.headers['x-container-sync-to'],
+    #                               self.allowed_sync_hosts)
+    #        if err:
+    #            return HTTPBadRequest(err)
+    #    if self.mount_check and not check_mount(self.root, drive):
+    #        return HTTPInsufficientStorage(drive=drive, request=req)
+    #    broker = self._get_container_broker(drive, part, account, container)
+    #    if broker.is_deleted():
+    #        return HTTPNotFound(request=req)
+    #    timestamp = normalize_timestamp(req.headers['x-timestamp'])
+    #    metadata = {}
+    #    metadata.update(
+    #        (key, (value, timestamp)) for key, value in req.headers.iteritems()
+    #        if key.lower() in self.save_headers or
+    #        key.lower().startswith('x-container-meta-'))
+    #    if metadata:
+    #        if 'X-Container-Sync-To' in metadata:
+    #            if 'X-Container-Sync-To' not in broker.metadata or \
+    #                    metadata['X-Container-Sync-To'][0] != \
+    #                    broker.metadata['X-Container-Sync-To'][0]:
+    #                broker.set_x_container_sync_points(-1, -1)
+    #        broker.update_metadata(metadata)
+    #    return HTTPNoContent(request=req)
+
 
 class LFSObjectController(Controller):
     """WSGI controller for object requests."""
@@ -1422,7 +1528,7 @@ class LFSObjectController(Controller):
     #            '%s-%s/%s/%s' % (delete_at, account, container, obj),
     #            host, partition, contdevice, headers_out, objdevice)
 
-    #tbd
+    #tbd - back-end implementation
     #@public
     #@timing_stats
     #def POST(self, request):

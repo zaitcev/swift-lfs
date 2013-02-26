@@ -121,8 +121,10 @@ class S(object):
 
 def _setup(state, mode):
     state.testdir = os.path.join(mkdtemp(), 'tmp_test_proxy_server_lfs')
-    conf = {'devices': state.testdir, 'swift_dir': state.testdir,
-            'mount_check': 'false', 'allow_versions': 'True',
+    conf = {'devices': state.testdir,
+            'swift_dir': state.testdir,
+            'mount_check': 'false',
+            'allow_versions': 'True',
             'allow_account_management': 'yes',
             'lfs_mode': mode,
             'lfs_root': state.testdir}
@@ -139,15 +141,12 @@ def _setup(state, mode):
 
     # Create account (can only be done with HEAD, never GET)
     # XXX Why not create a controller directly and invoke it?
-    # XXX Why not connect_tcp(prolis.getsockname())?
     sock = connect_tcp(('localhost', prolis.getsockname()[1]))
     fd = sock.makefile()
     fd.write('HEAD /v1/a HTTP/1.1\r\nHost: localhost\r\n'
                  'Connection: close\r\nContent-Length: 0\r\n\r\n')
     fd.flush()
-    # P3
-    # headers = readuntil2crlfs(fd)
-    headers = fd.read()
+    headers = readuntil2crlfs(fd)
     # P3
     fp = open("/tmp/dump","a")
     print >>fp, "== HEAD"
@@ -267,10 +266,6 @@ class TestProxyServerLFS(unittest.TestCase):
     #def tearDown(self):
     #    _teardown(self)
 
-    # XXX remove this once first normal test works
-    def test_nothing(self):
-        pass
-
     def _test_GET_newest_large_file(self, state):
         calls = [0]
 
@@ -308,11 +303,89 @@ class TestProxyServerLFS(unittest.TestCase):
         finally:
             signal.signal(signal.SIGPIPE, old_handler)
 
-    def test_GET_newest_large_file_gluster(self):
+    def test_GET_newest_large_file(self):
         self._test_GET_newest_large_file(_sg)
-
-    def test_GET_newest_large_file_posix(self):
         self._test_GET_newest_large_file(_sp)
+
+    ## reproduce byte for byte but with LFSObjectController
+    #def test_PUT_max_size(self):
+    #    with save_globals():
+    #        set_http_connect(201, 201, 201)
+    #        controller = proxy_server.ObjectController(self.app, 'account',
+    #                                                   'container', 'object')
+    #        req = Request.blank('/a/c/o', {}, headers={
+    #            'Content-Length': str(MAX_FILE_SIZE + 1),
+    #            'Content-Type': 'foo/bar'})
+    #        self.app.update_request(req)
+    #        res = controller.PUT(req)
+    #        self.assertEquals(res.status_int, 413)
+
+    # Copied verbatim. Not sure if needed if we have it in test_server.py.
+    def _test_chunked_put_bad_version(self, state):
+        prolis = state.sockets[0]
+        # Check bad version
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('GET /v0 HTTP/1.1\r\nHost: localhost\r\n'
+                 'Connection: close\r\nContent-Length: 0\r\n\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 412'
+        self.assertEquals(headers[:len(exp)], exp)
+
+    def test_chunked_put_bad_version(self):
+        self._test_chunked_put_bad_version(_sg)
+        self._test_chunked_put_bad_version(_sp)
+
+    # Copied verbatim. Not sure if needed if we have it in test_server.py.
+    def _test_chunked_put_bad_path(self, state):
+        prolis = state.sockets[0]
+        # Check bad path
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('GET invalid HTTP/1.1\r\nHost: localhost\r\n'
+                 'Connection: close\r\nContent-Length: 0\r\n\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 404'
+        self.assertEquals(headers[:len(exp)], exp)
+
+    def test_chunked_put_bad_path(self):
+        self._test_chunked_put_bad_path(_sg)
+        self._test_chunked_put_bad_path(_sp)
+
+    # Homemade: POST to account and verify that it works at all.
+    def _test_account_POST(self, state):
+        prolis = state.sockets[0]
+        # Set a metadata header
+        #req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'POST'},
+        #    headers={'X-Timestamp': normalize_timestamp(1),
+        #             'X-Account-Meta-Test': 'Value'})
+        #resp = self.controller.POST(req)
+        #self.assertEquals(resp.status_int, 204)
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('POST /v1/a HTTP/1.1\r\nHost: kvm-rei:8080\r\n'
+                 'Accept: */*\r\nX-Timestamp: 1\r\nX-Account-Meta: Value\r\n'
+                 'Connection: close\r\nContent-Length: 0\r\n\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 204'
+        self.assertEquals(headers[:len(exp)], exp)
+        # XXX do HEAD and verify the metadata value
+        #req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'HEAD'})
+        #resp = self.controller.HEAD(req)
+        #self.assertEquals(resp.status_int, 204)
+        #self.assertEquals(resp.headers.get('x-account-meta-test'), 'New Value')
+
+    def test_account_POST(self):
+        self._test_account_POST(_sg)
+        self._test_account_POST(_sp)
+
+    # def test_container_POST(self):
+    # def test_object_POST(self):
+
+    # def test_DELETE(self):
 
 if __name__ == '__main__':
     setup()
