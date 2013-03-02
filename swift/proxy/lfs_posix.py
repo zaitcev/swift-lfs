@@ -100,12 +100,20 @@ class LFSPluginPosix():
         self.read_to_eof = False
         self.iter_etag = None
         self.disk_chunk_size = 128*1024
+        self.metadata = {}
 
         if not os.path.exists(self.datadir):
-            self.metadata = {}
             # P3
             fp = open("/tmp/dump","a")
             print >>fp, "posix __init__ not exist"
+            fp.close()
+            return
+
+        if self._type == 1 or self._type == 2:
+            self.metadata = read_metadata(self.datadir)
+            # P3
+            fp = open("/tmp/dump","a")
+            print >>fp, "posix __init__ done"
             fp.close()
             return
 

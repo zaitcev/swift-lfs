@@ -357,26 +357,29 @@ class TestProxyServerLFS(unittest.TestCase):
     # Homemade: POST to account and verify that it works at all.
     def _test_account_POST(self, state):
         prolis = state.sockets[0]
+        prosrv = state.servers[0]
+        path = '/v1/a'
+        key = 'Test'
+        value = 'Value'
+
         # Set a metadata header
-        #req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'POST'},
-        #    headers={'X-Timestamp': normalize_timestamp(1),
-        #             'X-Account-Meta-Test': 'Value'})
-        #resp = self.controller.POST(req)
-        #self.assertEquals(resp.status_int, 204)
+        # Go whole hog on TCP connection so we test more this time.
         sock = connect_tcp(('localhost', prolis.getsockname()[1]))
         fd = sock.makefile()
-        fd.write('POST /v1/a HTTP/1.1\r\nHost: kvm-rei:8080\r\n'
-                 'Accept: */*\r\nX-Timestamp: 1\r\nX-Account-Meta: Value\r\n'
-                 'Connection: close\r\nContent-Length: 0\r\n\r\n')
+        fd.write('POST %s HTTP/1.1\r\nHost: kvm-rei:8080\r\n'
+                 'Accept: */*\r\nX-Timestamp: 1\r\nX-Account-Meta-%s: %s\r\n'
+                 'Connection: close\r\nContent-Length: 0\r\n\r\n' %
+                 (path, key, value))
         fd.flush()
         headers = readuntil2crlfs(fd)
         exp = 'HTTP/1.1 204'
         self.assertEquals(headers[:len(exp)], exp)
-        # XXX do HEAD and verify the metadata value
-        #req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'HEAD'})
-        #resp = self.controller.HEAD(req)
-        #self.assertEquals(resp.status_int, 204)
-        #self.assertEquals(resp.headers.get('x-account-meta-test'), 'New Value')
+
+        # Get the metadata value and verify it
+        req = Request.blank(path, environ={'REQUEST_METHOD': 'HEAD'})
+        res = req.get_response(prosrv)
+        self.assertEquals(res.status_int, 204)
+        self.assertEquals(res.headers.get('x-account-meta-%s' % key), value)
 
     def test_account_POST(self):
         self._test_account_POST(_sg)
