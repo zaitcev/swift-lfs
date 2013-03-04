@@ -43,7 +43,7 @@ from swift.common.swob import (
     HTTPRequestEntityTooLarge,
     Response)
 from swift.common.utils import (ContextPool, get_param, json,
-    normalize_timestamp, public, split_path)
+    normalize_timestamp, public)
 from swift.proxy.controllers.base import Controller
 from swift.proxy.controllers.obj import SegmentedIterable
 
@@ -95,8 +95,8 @@ class LFSAccountController(Controller):
     def __init__(self, app, account_name, **kwargs):
         Controller.__init__(self, app)
         #self.app = app
+        self.account_name = unquote(account_name)
 
-        #self.account_name = unquote(account_name)
         # XXX needed?
         # if not self.app.allow_account_management:
         #     self.allowed_methods.remove('PUT')
@@ -114,15 +114,11 @@ class LFSAccountController(Controller):
     @public
     def HEAD(self, req):
         """Handler for HTTP HEAD requests."""
-        try:
-            v1, account = split_path(unquote(req.path), 2, 2)
-        except ValueError, err:
-            return HTTPBadRequest(body=str(err), content_type='text/plain',
-                                  request=req)
         # XXX Wait, this can't be right. We mount on the root, right?
         #if not check_mount(self.app.lfs_root, drive):
         #    return HTTPInsufficientStorage(drive=drive, request=req)
-        pbroker = self.plugin_class(self.app, account, None, None, False)
+        pbroker = self.plugin_class(self.app, self.account_name,
+                                    None, None, False)
         created = False
         if not pbroker.exists():
             # XXX see, if only initialize() returned an error...
@@ -157,14 +153,10 @@ class LFSAccountController(Controller):
     @public
     def GET(self, req):
         """Handler for HTTP GET requests."""
-        try:
-            v1, account = split_path(unquote(req.path), 2, 2)
-        except ValueError, err:
-            return HTTPBadRequest(body=str(err), content_type='text/plain',
-                                  request=req)
         #if not check_mount(self.app.lfs_root, self.ufo_drive):
         #    return HTTPInsufficientStorage(request=req)
-        pbroker = self.plugin_class(self.app, account, None, None, False)
+        pbroker = self.plugin_class(self.app, self.account_name,
+                                    None, None, False)
         # XXX Why does it work to assign these variables to Gluster?
         # The DiskDir.py and friends do not seem to contain any code
         # to make this work or delegate to stock Swift.
@@ -173,7 +165,7 @@ class LFSAccountController(Controller):
         #broker.stale_reads_ok = True
         if not pbroker.exists():
             pbroker.initialize(normalize_timestamp(time.time()))
-            #resp = self._put(req, broker, account)
+            #resp = self._put(req, broker, self.account_name)
             #if resp != HTTPCreated:
             #    return resp
             if not pbroker.exists():
@@ -228,7 +220,7 @@ class LFSAccountController(Controller):
             account_list = json.dumps(data)
         elif out_content_type.endswith('/xml'):
             output_list = ['<?xml version="1.0" encoding="UTF-8"?>',
-                           '<account name="%s">' % account]
+                           '<account name="%s">' % self.account_name]
             for (name, object_count, bytes_used, is_subdir) in account_list:
                 name = saxutils.escape(name)
                 if is_subdir:
@@ -252,15 +244,10 @@ class LFSAccountController(Controller):
     @public
     def PUT(self, req):
         """Handle HTTP PUT request."""
-        try:
-            # v1, account, container = split_path(unquote(req.path), 2, 3)
-            v1, account = split_path(unquote(req.path), 2, 2)
-        except ValueError, err:
-            return HTTPBadRequest(body=str(err), content_type='text/plain',
-                                  request=req)
         #if not check_mount(self.app.lfs_root, self.ufo_drive):
         #    return HTTPInsufficientStorage(request=req)
-        pbroker = self.plugin_class(self.app, account, None, None, False)
+        pbroker = self.plugin_class(self.app, self.account_name,
+                                    None, None, False)
 
         timestamp = normalize_timestamp(time.time())
         if not pbroker.exists():
@@ -296,17 +283,13 @@ class LFSAccountController(Controller):
     @public
     def POST(self, req):
         """HTTP POST request handler."""
-        try:
-            v1, account = split_path(unquote(req.path), 2, 2)
-        except ValueError, err:
-            return HTTPBadRequest(body=str(err), content_type='text/plain',
-                                  request=req)
         #if not check_mount(self.app.lfs_root, self.ufo_drive):
         #    return HTTPInsufficientStorage(request=req)
         #error_response = check_metadata(req, 'account')
         #if error_response:
         #    return error_response
-        pbroker = self.plugin_class(self.app, account, None, None, False)
+        pbroker = self.plugin_class(self.app, self.account_name,
+                                    None, None, False)
         #if self.app.memcache:
         #    self.app.memcache.delete(
         #        get_account_memcache_key(self.account_name))
@@ -339,9 +322,11 @@ class LFSContainerController(Controller):
     #                'x-container-sync-key', 'x-container-sync-to']
     save_headers = []
 
-    def __init__(self, app, **kwargs):
+    def __init__(self, app, account_name, container_name, **kwargs):
         Controller.__init__(self, app)
         #self.app = app
+        self.account_name = unquote(account_name)
+        self.container_name = unquote(container_name)
 
         # XXX XXX
         #self.auto_create_account_prefix = \
@@ -398,28 +383,10 @@ class LFSContainerController(Controller):
     @public
     def PUT(self, req):
         """Handle HTTP PUT request."""
-        try:
-            #v1, account, container, obj = split_path(unquote(req.path), 3, 4)
-            v1, account, container = split_path(unquote(req.path), 3, 3)
-        except ValueError, err:
-            return HTTPBadRequest(body=str(err), content_type='text/plain',
-                                  request=req)
         timestamp = normalize_timestamp(time.time())
-        pbroker = self.plugin_class(self.app, account, container, None, False)
-
-        #if obj:     # put container object
-        #    if account.startswith(self.auto_create_account_prefix) and \
-        #            not os.path.exists(broker.db_file):
-        #        broker.initialize(timestamp)
-        #    if not os.path.exists(broker.db_file):
-        #        return HTTPNotFound()
-        #    # XXX Where to get the headers? Proxy inserts it somehow.
-        #    #broker.put_object(obj, timestamp, int(req.headers['x-size']),
-        #    #                  req.headers['x-content-type'],
-        #    #                  req.headers['x-etag'])
-        #    broker.put_object(obj, timestamp, None,None,None)
-        #    return HTTPCreated(request=req)
-        #else:   # put container
+        pbroker = self.plugin_class(self.app,
+                                    self.account_name, self.container_name,
+                                    None, False)
 
         if not pbroker.exists():
             pbroker.initialize(timestamp)
@@ -439,7 +406,8 @@ class LFSContainerController(Controller):
             key.lower().startswith('x-container-meta-'))
         if metadata:
             pbroker.update_metadata(metadata)
-        resp = self._account_update(req, account, container, pbroker)
+        resp = self._account_update(req, self.account_name, self.container_name,
+                                    pbroker)
         if resp:
             return resp
         if created:
