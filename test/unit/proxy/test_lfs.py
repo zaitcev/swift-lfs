@@ -385,10 +385,55 @@ class TestProxyServerLFS(unittest.TestCase):
         self._test_account_POST(_sg)
         self._test_account_POST(_sp)
 
-    # def test_container_POST(self):
+    # POST to container at back end, modelled after a container test
+    def _test_POST_HEAD_metadata(self, state):
+        prosrv = state.servers[0]
+        # This container is pre-created
+        path = '/v1/a/c'
+
+        # Set metadata header
+        req = Request.blank(path, environ={'REQUEST_METHOD': 'POST'},
+            headers={'X-Container-Meta-Test': 'Value'})
+        res = req.get_response(prosrv)
+        self.assertEquals(res.status_int, 204)
+        req = Request.blank(path, environ={'REQUEST_METHOD': 'HEAD'})
+        res = req.get_response(prosrv)
+        self.assertEquals(res.status_int, 204)
+        self.assertEquals(res.headers.get('x-container-meta-test'), 'Value')
+        # Update metadata header
+        req = Request.blank(path, environ={'REQUEST_METHOD': 'POST'},
+            headers={'X-Container-Meta-Test': 'New Value'})
+        res = req.get_response(prosrv)
+        self.assertEquals(res.status_int, 204)
+        req = Request.blank(path, environ={'REQUEST_METHOD': 'HEAD'})
+        res = req.get_response(prosrv)
+        self.assertEquals(res.status_int, 204)
+        self.assertEquals(res.headers.get('x-container-meta-test'),
+                          'New Value')
+        # Remove metadata header (by setting it to empty)
+        req = Request.blank(path, environ={'REQUEST_METHOD': 'POST'},
+            headers={'X-Container-Meta-Test': ''})
+        res = req.get_response(prosrv)
+        self.assertEquals(res.status_int, 204)
+        req = Request.blank(path, environ={'REQUEST_METHOD': 'HEAD'})
+        res = req.get_response(prosrv)
+        self.assertEquals(res.status_int, 204)
+        self.assert_('x-container-meta-test' not in res.headers)
+
+    def test_container_POST(self):
+        self._test_POST_HEAD_metadata(_sg)
+        self._test_POST_HEAD_metadata(_sp)
+
+    # XXX write a test for container listings with marker and delimiter 4.2.1.3
+
     # def test_object_POST(self):
 
     # def test_DELETE(self):
+
+    # XXX Test that numbers of objects are updated in containers
+    # XXX Test that numbers of containers are updated in accounts
+    # XXX Test lists of containers
+    # XXX Test lists of objects (delimiter and marker)
 
 if __name__ == '__main__':
     setup()

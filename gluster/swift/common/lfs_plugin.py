@@ -86,6 +86,10 @@ class LFSPluginGluster():
         return self.broker.list_containers_iter(limit, marker, end_marker,
                                                 prefix, delimiter)
 
+    def list_objects_iter(self, limit,marker,end_marker,prefix,delimiter,path):
+        return self.broker.list_objects_iter(limit, marker, end_marker,
+                                             prefix, delimiter, path)
+
     def put_container(self, container, put_timestamp, delete_timestamp,
                       object_count, bytes_used):
         # BTW, Gluster in 3.3.x does this:

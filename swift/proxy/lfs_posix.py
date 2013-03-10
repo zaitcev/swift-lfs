@@ -73,6 +73,24 @@ def write_meta_file(path, metadata):
     with open(path, "w") as fp:
         fp.write(metastr)
 
+def load_meta_file(obj_path):
+    files = sorted(os.listdir(obj_path), reverse=True)
+    meta_file = None
+    data_file = None
+    for file in files:
+        if file.endswith('.ts'):
+            metadata = {'deleted': True}
+            return metadata
+        if file.endswith('.meta') and not meta_file:
+            meta_file = os.path.join(self.datadir, file)
+        if file.endswith('.data') and not data_file:
+            data_file = os.path.join(self.datadir, file)
+        if meta_file and self.data_file:
+            break
+    if not meta_file:
+        return None
+    return read_meta_file(meta_file)
+
 # XXX How about implementing a POSIX pbroker that does not use xattr?
 class LFSPluginPosix():
     def __init__(self, app, account, container, obj, keep_data_fp):
@@ -117,6 +135,7 @@ class LFSPluginPosix():
             fp.close()
             return
 
+        # XXX use a common load_meta_file() here - when P3's are gone
         files = sorted(os.listdir(self.datadir), reverse=True)
         for file in files:
             if file.endswith('.ts'):
@@ -221,17 +240,17 @@ class LFSPluginPosix():
 
     # This is called a something_iter, but it is not actually an iterator.
     def list_containers_iter(self, limit,marker,end_marker,prefix,delimiter):
-        # XXX implement marker, delimeter; consult CF devguide
+        # XXX implement delimeter; consult CF devguide
 
         containers = os.listdir(self.datadir)
         containers.sort()
         containers.reverse()
 
-        retults = []
+        results = []
         count = 0
         for cont in containers:
             if prefix:
-                if not container.startswith(prefix):
+                if not cont.startswith(prefix):
                     continue
             if marker:
                 if cont == marker:
@@ -241,6 +260,45 @@ class LFSPluginPosix():
                 # XXX (name, object_count, bytes_used, is_subdir)
                 # XXX Should we encode in UTF-8 here or later?
                 results.append([cont, 0, 0, 1])
+                count += 1
+        return results
+
+    def list_objects_iter(self, limit, marker, end_marker, prefix, delim, path):
+        # XXX implement delimeter; consult CF devguide
+
+        objects = os.listdir(self.datadir)
+        objects.sort()
+        objects.reverse()
+
+        results = []
+        count = 0
+        for obj in objects:
+            if prefix:
+                if not obj.startswith(prefix):
+                    continue
+            if marker:
+                if obj == marker:
+                    marker = None
+                continue
+            if count < limit:
+                # XXX (name, object_count, bytes_used, is_subdir)
+                # XXX Should we encode in UTF-8 here or later?
+                results.append([cont, 0, 0, 1])
+
+                list_item = []
+                list_item.append(obj)
+                obj_path = os.path.join(self.datadir, obj)
+                # XXX aww brother this is gonna hurt... a lot (file read * N)
+                # We're taking it in the pants even worse than Gluster, because
+                # they just fetch the xattr and we must find the .meta file.
+                metadata = load_meta_file(obj_path)
+                if metadata:
+                    list_item.append(metadata[X_TIMESTAMP])
+                    list_item.append(int(metadata[X_CONTENT_LENGTH]))
+                    list_item.append(metadata[X_CONTENT_TYPE])
+                    list_item.append(metadata[X_ETAG])
+                results.append(list_item)
+
                 count += 1
         return results
 

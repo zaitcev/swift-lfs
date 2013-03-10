@@ -243,7 +243,7 @@ class LFSAccountController(Controller):
 
     @public
     def PUT(self, req):
-        """Handle HTTP PUT request."""
+        """Handler for HTTP PUT request."""
         #if not check_mount(self.app.lfs_root, self.ufo_drive):
         #    return HTTPInsufficientStorage(request=req)
         pbroker = self.plugin_class(self.app, self.account_name,
@@ -288,12 +288,12 @@ class LFSAccountController(Controller):
         #error_response = check_metadata(req, 'account')
         #if error_response:
         #    return error_response
+        timestamp = normalize_timestamp(time.time())
         pbroker = self.plugin_class(self.app, self.account_name,
                                     None, None, False)
         #if self.app.memcache:
         #    self.app.memcache.delete(
         #        get_account_memcache_key(self.account_name))
-        timestamp = normalize_timestamp(time.time())
         # and self.app.account_autocreate:
         if not pbroker.exists():
             if len(self.account_name) > MAX_ACCOUNT_NAME_LENGTH:
@@ -336,6 +336,19 @@ class LFSContainerController(Controller):
         # XXX this loads the class on every request
         self.plugin_class = load_the_plugin(self.app.lfs_mode)
 
+    # clean_acls is taken verbatim from ContainerController
+    def clean_acls(self, req):
+        if 'swift.clean_acl' in req.environ:
+            for header in ('x-container-read', 'x-container-write'):
+                if header in req.headers:
+                    try:
+                        req.headers[header] = \
+                            req.environ['swift.clean_acl'](header,
+                                                           req.headers[header])
+                    except ValueError, err:
+                        return HTTPBadRequest(request=req, body=str(err))
+        return None
+
     # This is modelled at account_update() but is only called internally
     # in case of pbroker.
     def _account_update(self, req, account, container, pbroker):
@@ -373,16 +386,226 @@ class LFSContainerController(Controller):
             return HTTPNoContent(request=req)
         return None
 
+    #def _get_or_head_tail(self, req, resp):
+    #    if 'swift.authorize' in req.environ:
+    #        req.acl = resp.headers.get('x-container-read')
+    #        aresp = req.environ['swift.authorize'](req)
+    #        if aresp:
+    #            return aresp
+    #    if not req.environ.get('swift_owner', False):
+    #        for key in ('x-container-read', 'x-container-write',
+    #                    'x-container-sync-key', 'x-container-sync-to'):
+    #            if key in resp.headers:
+    #                del resp.headers[key]
+    #    return resp
+
+    @public
+    def HEAD(self, req):
+        """Handler for HTTP HEAD requests."""
+        ## XXX account_info checks if account exists
+        #if not self.account_info(self.account_name)[1]:
+        #    return HTTPNotFound(request=req)
+
+        #if self.mount_check and not check_mount(self.root, drive):
+        #    return HTTPInsufficientStorage(drive=drive, request=req)
+
+        pbroker = self.plugin_class(self.app,
+                                    self.account_name, self.container_name,
+                                    None, False)
+        if not pbroker.exists():
+            return HTTPNotFound(request=req)
+        info = pbroker.get_info()
+        headers = {
+            'X-Container-Object-Count': info['object_count'],
+            'X-Container-Bytes-Used': info['bytes_used'],
+            'X-Timestamp': info['created_at'],
+            'X-PUT-Timestamp': info['put_timestamp'],
+        }
+        headers.update(
+            (key, value)
+            for key, (value, timestamp) in pbroker.metadata.iteritems()
+            if value != '' and (key.lower() in self.save_headers or
+                                key.lower().startswith('x-container-meta-')))
+        if get_param(req, 'format'):
+            req.accept = FORMAT2CONTENT_TYPE.get(
+                get_param(req, 'format').lower(), FORMAT2CONTENT_TYPE['plain'])
+        headers['Content-Type'] = req.accept.best_match(
+            ['text/plain', 'application/json', 'application/xml', 'text/xml'])
+        if not headers['Content-Type']:
+            return HTTPNotAcceptable(request=req)
+        resp = HTTPNoContent(request=req, headers=headers, charset='utf-8')
+
+        # this just does not seem to make sense
+        #    update_headers(res, source.getheaders())
+        #    if not res.environ:
+        #        res.environ = {}
+        #    res.environ['swift_x_timestamp'] = \
+        #        source.getheader('x-timestamp')
+        #    res.accept_ranges = 'bytes'
+        #    res.content_length = source.getheader('Content-Length')
+        #    if source.getheader('Content-Type'):
+        #        res.charset = None
+        #        res.content_type = source.getheader('Content-Type')
+
+        #if self.app.memcache:
+        #    # set the memcache container size for ratelimiting
+        #    cache_key = get_container_memcache_key(self.account_name,
+        #                                           self.container_name)
+        #    self.app.memcache.set(
+        #        cache_key,
+        #        headers_to_container_info(resp.headers, resp.status_int),
+        #        time=self.app.recheck_container_existence)
+
+        # XXX Why does the original check the authorization _after_ the action?
+        #resp = self._get_or_head_tail(req, resp)
+        return resp
+
     @public
     def GET(self, req):
-        """Handler for HTTP GET requests."""
-        resp = HTTPBadRequest(request=req)
-        resp.body = 'Not implemented'
+        """Handler for HTTP GET/HEAD requests."""
+        ## XXX account_info checks if account exists
+        #if not self.account_info(self.account_name)[1]:
+        #    return HTTPNotFound(request=req)
+
+        #if self.mount_check and not check_mount(self.root, drive):
+        #    return HTTPInsufficientStorage(drive=drive, request=req)
+
+        pbroker = self.plugin_class(self.app,
+                                    self.account_name, self.container_name,
+                                    None, False)
+        if not pbroker.exists():
+            return HTTPNotFound(request=req)
+        info = pbroker.get_info()
+        resp_headers = {
+            'X-Container-Object-Count': info['object_count'],
+            'X-Container-Bytes-Used': info['bytes_used'],
+            'X-Timestamp': info['created_at'],
+            'X-PUT-Timestamp': info['put_timestamp'],
+        }
+        resp_headers.update(
+            (key, value)
+            for key, (value, timestamp) in pbroker.metadata.iteritems()
+            if value != '' and (key.lower() in self.save_headers or
+                                key.lower().startswith('x-container-meta-')))
+        try:
+            path = get_param(req, 'path')
+            prefix = get_param(req, 'prefix')
+            delimiter = get_param(req, 'delimiter')
+            if delimiter and (len(delimiter) > 1 or ord(delimiter) > 254):
+                # delimiters can be made more flexible later
+                return HTTPPreconditionFailed(body='Bad delimiter')
+            marker = get_param(req, 'marker', '')
+            end_marker = get_param(req, 'end_marker')
+            limit = CONTAINER_LISTING_LIMIT
+            given_limit = get_param(req, 'limit')
+            if given_limit and given_limit.isdigit():
+                limit = int(given_limit)
+                if limit > CONTAINER_LISTING_LIMIT:
+                    return HTTPPreconditionFailed(
+                        request=req,
+                        body='Maximum limit is %d' % CONTAINER_LISTING_LIMIT)
+            query_format = get_param(req, 'format')
+        except UnicodeDecodeError, err:
+            return HTTPBadRequest(body='parameters not utf8',
+                                  content_type='text/plain', request=req)
+        if query_format:
+            req.accept = FORMAT2CONTENT_TYPE.get(query_format.lower(),
+                                                 FORMAT2CONTENT_TYPE['plain'])
+        out_content_type = req.accept.best_match(
+            ['text/plain', 'application/json', 'application/xml', 'text/xml'])
+        if not out_content_type:
+            return HTTPNotAcceptable(request=req)
+        container_list = pbroker.list_objects_iter(limit, marker, end_marker,
+                                                   prefix, delimiter, path)
+        if out_content_type == 'application/json':
+            data = []
+            for (name, created_at, size, content_type, etag) in container_list:
+                if content_type is None:
+                    data.append({"subdir": name})
+                else:
+                    created_at = datetime.utcfromtimestamp(
+                        float(created_at)).isoformat()
+                    # python isoformat() doesn't include msecs when zero
+                    if len(created_at) < len("1970-01-01T00:00:00.000000"):
+                        created_at += ".000000"
+                    data.append({'last_modified': created_at, 'bytes': size,
+                                'content_type': content_type, 'hash': etag,
+                                'name': name})
+            container_list = json.dumps(data)
+        elif out_content_type.endswith('/xml'):
+            xml_output = []
+            for (name, created_at, size, content_type, etag) in container_list:
+                # escape name and format date here
+                name = saxutils.escape(name)
+                created_at = datetime.utcfromtimestamp(
+                    float(created_at)).isoformat()
+                # python isoformat() doesn't include msecs when zero
+                if len(created_at) < len("1970-01-01T00:00:00.000000"):
+                    created_at += ".000000"
+                if content_type is None:
+                    xml_output.append('<subdir name="%s"><name>%s</name>'
+                                      '</subdir>' % (name, name))
+                else:
+                    content_type = saxutils.escape(content_type)
+                    xml_output.append(
+                        '<object><name>%s</name><hash>%s</hash>'
+                        '<bytes>%d</bytes><content_type>%s</content_type>'
+                        '<last_modified>%s</last_modified></object>' %
+                        (name, etag, size, content_type, created_at))
+            container_list = ''.join([
+                '<?xml version="1.0" encoding="UTF-8"?>\n',
+                '<container name=%s>' % saxutils.quoteattr(container),
+                ''.join(xml_output), '</container>'])
+        else:
+            if not container_list:
+                return HTTPNoContent(request=req, headers=resp_headers)
+            container_list = '\n'.join(r[0] for r in container_list) + '\n'
+        resp = Response(body=container_list, request=req, headers=resp_headers)
+        resp.content_type = out_content_type
+        resp.charset = 'utf-8'
+
+        # this just does not seem to make sense
+        #    update_headers(res, source.getheaders())
+        #    if not res.environ:
+        #        res.environ = {}
+        #    res.environ['swift_x_timestamp'] = \
+        #        source.getheader('x-timestamp')
+        #    res.accept_ranges = 'bytes'
+        #    res.content_length = source.getheader('Content-Length')
+        #    if source.getheader('Content-Type'):
+        #        res.charset = None
+        #        res.content_type = source.getheader('Content-Type')
+
+        #if self.app.memcache:
+        #    # set the memcache container size for ratelimiting
+        #    cache_key = get_container_memcache_key(self.account_name,
+        #                                           self.container_name)
+        #    self.app.memcache.set(
+        #        cache_key,
+        #        headers_to_container_info(resp.headers, resp.status_int),
+        #        time=self.app.recheck_container_existence)
+
+        # XXX Why does the original check the authorization _after_ the action?
+        #resp = self._get_or_head_tail(req, resp)
         return resp
 
     @public
     def PUT(self, req):
-        """Handle HTTP PUT request."""
+        """Handler for HTTP PUT request."""
+
+        #account_partition, accounts, container_count = \
+        #    self.account_info(self.account_name,
+        #                      autocreate=self.app.account_autocreate)
+        #if self.app.max_containers_per_account > 0 and \
+        #        container_count >= self.app.max_containers_per_account and \
+        #        self.account_name not in self.app.max_containers_whitelist:
+        #    resp = HTTPForbidden(request=req)
+        #    resp.body = 'Reached container limit of %s' % \
+        #                self.app.max_containers_per_account
+        #    return resp
+        #if not accounts:
+        #    return HTTPNotFound(request=req)
+
         timestamp = normalize_timestamp(time.time())
         pbroker = self.plugin_class(self.app,
                                     self.account_name, self.container_name,
@@ -398,6 +621,10 @@ class LFSContainerController(Controller):
             pbroker.update_put_timestamp(timestamp)
             if not pbroker.exists():
                 return HTTPConflict(request=req)
+        #if self.app.memcache:
+        #    cache_key = get_container_memcache_key(self.account_name,
+        #                                           self.container_name)
+        #    self.app.memcache.delete(cache_key)
         metadata = {}
         metadata.update(
             (key, (value, timestamp))
@@ -416,70 +643,58 @@ class LFSContainerController(Controller):
             return HTTPAccepted(request=req)
 
     #@cors_validation
-    #def POST(self, req):
-    #    """HTTP POST request handler."""
-    #    error_response = \
-    #        self.clean_acls(req) or check_metadata(req, 'container')
-    #    if error_response:
-    #        return error_response
-    #    account_partition, accounts, container_count = \
-    #        self.account_info(self.account_name,
-    #                          autocreate=self.app.account_autocreate)
-    #    if not accounts:
-    #        return HTTPNotFound(request=req)
-    #    container_partition, containers = self.app.container_ring.get_nodes(
-    #        self.account_name, self.container_name)
-    #    headers = {'X-Timestamp': normalize_timestamp(time.time()),
-    #               'x-trans-id': self.trans_id,
-    #               'Connection': 'close'}
-    #    self.transfer_headers(req.headers, headers)
-    #    if self.app.memcache:
-    #        self.app.memcache.delete(get_container_memcache_key(
-    #            self.account_name, self.container_name))
-    #    resp = self.make_requests(
-    #        req, self.app.container_ring, container_partition, 'POST',
-    #        req.path_info, [headers] * len(containers))
-    #    return resp
+    @public
+    def POST(self, req):
+        """HTTP POST request handler."""
+        #error_response = \
+        #    self.clean_acls(req) or check_metadata(req, 'container')
+        error_response = self.clean_acls(req)
+        if error_response:
+            return error_response
+        timestamp =  normalize_timestamp(time.time())
+        # XXX account_info verifies that account exists
+        #account_partition, accounts, container_count = \
+        #    self.account_info(self.account_name,
+        #                      autocreate=self.app.account_autocreate)
+        #if not accounts:
+        #    return HTTPNotFound(request=req)
+        pbroker = self.plugin_class(self.app,
+                                    self.account_name, self.container_name,
+                                    None, False)
+        if not pbroker.exists():
+            pbroker.initialize(timestamp)
+            created = True
+        #headers = {'X-Timestamp': normalize_timestamp(time.time()),
+        #           'x-trans-id': self.trans_id,
+        #           'Connection': 'close'}
+        headers = {}
+        self.transfer_headers(req.headers, headers)
+        #if self.app.memcache:
+        #    self.app.memcache.delete(get_container_memcache_key(
+        #        self.account_name, self.container_name))
 
-    ## implementation at node:
-    #@public
-    #@timing_stats()
-    #def POST(self, req):
-    #    """Handle HTTP POST request."""
-    #    try:
-    #        drive, part, account, container = req.split_path(4)
-    #        validate_device_partition(drive, part)
-    #    except ValueError, err:
-    #        return HTTPBadRequest(body=str(err), content_type='text/plain',
-    #                              request=req)
-    #    if 'x-timestamp' not in req.headers or \
-    #            not check_float(req.headers['x-timestamp']):
-    #        return HTTPBadRequest(body='Missing or bad timestamp',
-    #                              request=req, content_type='text/plain')
-    #    if 'x-container-sync-to' in req.headers:
-    #        err = validate_sync_to(req.headers['x-container-sync-to'],
-    #                               self.allowed_sync_hosts)
-    #        if err:
-    #            return HTTPBadRequest(err)
-    #    if self.mount_check and not check_mount(self.root, drive):
-    #        return HTTPInsufficientStorage(drive=drive, request=req)
-    #    broker = self._get_container_broker(drive, part, account, container)
-    #    if broker.is_deleted():
-    #        return HTTPNotFound(request=req)
-    #    timestamp = normalize_timestamp(req.headers['x-timestamp'])
-    #    metadata = {}
-    #    metadata.update(
-    #        (key, (value, timestamp)) for key, value in req.headers.iteritems()
-    #        if key.lower() in self.save_headers or
-    #        key.lower().startswith('x-container-meta-'))
-    #    if metadata:
-    #        if 'X-Container-Sync-To' in metadata:
-    #            if 'X-Container-Sync-To' not in broker.metadata or \
-    #                    metadata['X-Container-Sync-To'][0] != \
-    #                    broker.metadata['X-Container-Sync-To'][0]:
-    #                broker.set_x_container_sync_points(-1, -1)
-    #        broker.update_metadata(metadata)
-    #    return HTTPNoContent(request=req)
+        #if 'x-container-sync-to' in headers:
+        #    err = validate_sync_to(headers['x-container-sync-to'],
+        #                           self.allowed_sync_hosts)
+        #    if err:
+        #        return HTTPBadRequest(err)
+
+        #if self.mount_check and not check_mount(self.root, drive):
+        #    return HTTPInsufficientStorage(drive=drive, request=req)
+
+        metadata = {}
+        metadata.update(
+            (key, (value, timestamp)) for key, value in headers.iteritems()
+            if key.lower() in self.save_headers or
+            key.lower().startswith('x-container-meta-'))
+        if metadata:
+            #if 'X-Container-Sync-To' in metadata:
+            #    if 'X-Container-Sync-To' not in pbroker.metadata or \
+            #            metadata['X-Container-Sync-To'][0] != \
+            #            pbroker.metadata['X-Container-Sync-To'][0]:
+            #        pbroker.set_x_container_sync_points(-1, -1)
+            pbroker.update_metadata(metadata)
+        return HTTPNoContent(request=req)
 
 
 class LFSObjectController(Controller):
@@ -651,7 +866,7 @@ class LFSObjectController(Controller):
         return request.get_response(response)
 
     def GETorHEAD(self, req):
-        """Handle HTTP GET or HEAD requests."""
+        """Handler for HTTP GET or HEAD requests."""
         container_info = self._container_info(self.account_name,
                                              self.container_name)
         req.acl = container_info['read_acl']
@@ -1846,7 +2061,7 @@ class LFSPlugin(object):
     #  put_container(self, container, put_timestamp, delete_timestamp,
     #                obj_count, bytes_used)
     #  #put_object(self, name, timestamp, size, content_type, etag, deleted=0)
-    #  #list_objects_iter(self, limit,marker,end_marker,prefix,delimiter,path)
+    #  list_objects_iter(self, limit,marker,end_marker,prefix,delimiter,path)
     #  __iter__(self) - to be assigned to Request.app_iter
     #    It seems that swob essentially requires the supplied callable of GET
     #    to be a class, because it checks for hasattr('app_iter_ranges').
