@@ -73,6 +73,7 @@ def write_meta_file(path, metadata):
     with open(path, "w") as fp:
         fp.write(metastr)
 
+# N.B. This can return an object type metadata if tombstone is found.
 def load_meta_file(obj_path):
     files = sorted(os.listdir(obj_path), reverse=True)
     meta_file = None
@@ -305,11 +306,15 @@ class LFSPluginPosix():
     def update_metadata(self, metadata):
         if self._type != 0:
             if metadata:
-                new_metadata = self.metadata.copy()
-                new_metadata.update(metadata)
-                if new_metadata != self.metadata:
-                    write_metadata(self.datadir, new_metadata)
-                    self.metadata = new_metadata
+                # Both old Swift and Gluster attempt to optimize out the
+                # case of unchanged metadata. We'll do it later.
+                md = self.metadata.copy()
+                for key, value_timestamp in metadata.iteritems():
+                    value, timestamp = value_timestamp
+                    if key not in md or timestamp > md[key][1]:
+                        md[key] = value_timestamp
+                write_metadata(self.datadir, md)
+                self.metadata = md
 
     def update_put_timestamp(self, timestamp):
         ts = int(float(timestamp))
@@ -362,6 +367,7 @@ class LFSPluginPosix():
         :param metadata: dictionary of metadata to be written
         """
         assert self.tmppath is not None
+        assert self._type == 0
         # wait, what?
         #metadata['name'] = self.name
         timestamp = normalize_timestamp(metadata['X-Timestamp'])
@@ -377,6 +383,18 @@ class LFSPluginPosix():
         #tpool.execute(fsync, fd)
         renamer(self.tmppath, base_path + ".data")
         # but not setting self.data_file here, is this right?
+        self.metadata = metadata
+
+    def put_metadata(self, metadata):
+        assert self._type == 0
+        if not self.meta_file:
+            return
+        # P3
+        fp = open("/tmp/dump","a")
+        print >>fp, "posix put_meta", self.meta_file
+        fp.close()
+        write_meta_file(self.meta_file, metadata)
+        # XXX os.fsync maybe?
         self.metadata = metadata
 
     def _handle_close_quarantine(self):
@@ -454,6 +472,7 @@ class LFSPluginPosix():
 
         :param timestamp: timestamp to compare with each file
         """
+        assert self._type == 0
         if not self.metadata or self.metadata['X-Timestamp'] >= timestamp:
             return
 
@@ -478,6 +497,7 @@ class LFSPluginPosix():
         :raises DiskFileError: on file size mismatch.
         :raises DiskFileNotExist: on file not existing (including deleted)
         """
+        assert self._type == 0
         try:
             file_size = 0
             if self.data_file:

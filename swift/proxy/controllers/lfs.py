@@ -85,7 +85,7 @@ def load_the_plugin(selector):
 #    id - huh?
 #  + status (== 'DELETED')
 #    status_changed_at - '0'
-#  ? metadata - pickled? We save in xattr.
+#  ? metadata - pickled? We save in a .meta file currently (or possibly xattr).
 #      manifest - in x-object-manifest metadata for now, may promote later
 
 class LFSAccountController(Controller):
@@ -720,6 +720,11 @@ class LFSObjectController(Controller):
             'x-delete-at',
             'x-object-manifest'])
 
+        self.retained_meta_keys = set([
+            'Content-Type',
+            'Content-Length',
+            'ETag'])
+
         # XXX this loads the class on every request
         self.plugin_class = load_the_plugin(self.app.lfs_mode)
 
@@ -837,8 +842,14 @@ class LFSObjectController(Controller):
             pbroker.close()
             return HTTPNotModified(request=request)
 
-        response = Response(app_iter=pbroker,
-                            request=request, conditional_response=True)
+        if request.method == 'HEAD':
+            # Original Swift does not need to set HTTPNoContent anywhere
+            # on HEAD path to objects. How does it do it?
+            response = Response(status=204,
+                                request=request, conditional_response=True)
+        else:
+            response = Response(app_iter=pbroker,
+                                request=request, conditional_response=True)
         response.headers['Content-Type'] = pbroker.metadata.get(
             'Content-Type', 'application/octet-stream')
         for key, value in pbroker.metadata.iteritems():
@@ -859,11 +870,8 @@ class LFSObjectController(Controller):
         if 'Content-Encoding' in pbroker.metadata:
             response.content_encoding = pbroker.metadata['Content-Encoding']
         response.headers['X-Timestamp'] = pbroker.metadata['X-Timestamp']
-        # XXX This is verbatim what stock Swift does: calls Response as if
-        # it were the app, new Response is instantiated. The problem is that
-        # we rolled 2 code paths into 1: proxy and object. Now we have WSGI
-        # app called twice. GET is idempotent, but still we must fix this.
-        return request.get_response(response)
+
+        return response
 
     def GETorHEAD(self, req):
         """Handler for HTTP GET or HEAD requests."""
@@ -876,12 +884,14 @@ class LFSObjectController(Controller):
             if aresp:
                 return aresp
 
-        ## Basically need to create an iterator that loops "yield chunk".
-        # res = Response(request=req, conditional_response=True)
-        # res.app_iter = self._make_app_iter(node, source)
-
-        resp = self._get_or_head(req)
         # or maybe self._get() and self._head()
+        resp = self._get_or_head(req)
+
+        ## XXX This is verbatim what stock Swift does: calls Response as if
+        ## it were the app, new Response is instantiated. The problem is that
+        ## we rolled 2 code paths into 1: proxy and object. Now we have WSGI
+        ## app called twice. GET is idempotent, but still we must fix this.
+        #    resp = req.get_response(resp)
 
         # also there's this in GETorHEADbase:
         #    res.environ['swift_x_timestamp'] = \
@@ -980,117 +990,6 @@ class LFSObjectController(Controller):
     def HEAD(self, req):
         """Handler for HTTP HEAD requests."""
         return self.GETorHEAD(req)
-
-    #@public
-    #@cors_validation
-    #@delay_denial
-    #def POST(self, req):
-    #    """HTTP POST request handler."""
-    #    if 'x-delete-after' in req.headers:
-    #        try:
-    #            x_delete_after = int(req.headers['x-delete-after'])
-    #        except ValueError:
-    #            return HTTPBadRequest(request=req,
-    #                                  content_type='text/plain',
-    #                                  body='Non-integer X-Delete-After')
-    #        req.headers['x-delete-at'] = '%d' % (time.time() + x_delete_after)
-    #    if self.app.object_post_as_copy:
-    #        req.method = 'PUT'
-    #        req.path_info = '/%s/%s/%s' % (
-    #            self.account_name, self.container_name, self.object_name)
-    #        req.headers['Content-Length'] = 0
-    #        req.headers['X-Copy-From'] = quote('/%s/%s' % (self.container_name,
-    #                                           self.object_name))
-    #        req.headers['X-Fresh-Metadata'] = 'true'
-    #        req.environ['swift_versioned_copy'] = True
-    #        resp = self.PUT(req)
-    #        # Older editions returned 202 Accepted on object POSTs, so we'll
-    #        # convert any 201 Created responses to that for compatibility with
-    #        # picky clients.
-    #        if resp.status_int != HTTP_CREATED:
-    #            return resp
-    #        return HTTPAccepted(request=req)
-    #    else:
-    #        error_response = check_metadata(req, 'object')
-    #        if error_response:
-    #            return error_response
-    #        container_info = self._container_info(
-    #            self.account_name, self.container_name,
-    #            account_autocreate=self.app.account_autocreate)
-    #        container_partition = container_info['partition']
-    #        containers = container_info['nodes']
-    #        req.acl = container_info['write_acl']
-    #        if 'swift.authorize' in req.environ:
-    #            aresp = req.environ['swift.authorize'](req)
-    #            if aresp:
-    #                return aresp
-    #        if not containers:
-    #            return HTTPNotFound(request=req)
-    #        if 'x-delete-at' in req.headers:
-    #            try:
-    #                x_delete_at = int(req.headers['x-delete-at'])
-    #                if x_delete_at < time.time():
-    #                    return HTTPBadRequest(
-    #                        body='X-Delete-At in past', request=req,
-    #                        content_type='text/plain')
-    #            except ValueError:
-    #                return HTTPBadRequest(request=req,
-    #                                      content_type='text/plain',
-    #                                      body='Non-integer X-Delete-At')
-    #            delete_at_container = str(
-    #                x_delete_at /
-    #                self.app.expiring_objects_container_divisor *
-    #                self.app.expiring_objects_container_divisor)
-    #            delete_at_part, delete_at_nodes = \
-    #                self.app.container_ring.get_nodes(
-    #                    self.app.expiring_objects_account, delete_at_container)
-    #        else:
-    #            delete_at_part = delete_at_nodes = None
-    #        partition, nodes = self.app.object_ring.get_nodes(
-    #            self.account_name, self.container_name, self.object_name)
-    #        req.headers['X-Timestamp'] = normalize_timestamp(time.time())
-
-    #        headers = self._backend_requests(
-    #            req, len(nodes), container_partition, containers,
-    #            delete_at_part, delete_at_nodes)
-
-    #        resp = self.make_requests(req, self.app.object_ring, partition,
-    #                                  'POST', req.path_info, headers)
-    #        return resp
-
-    ## common per-node splitter for PUT, POST, DELETE
-    #def _backend_requests(self, req, n_outgoing,
-    #                      container_partition, containers,
-    #                      delete_at_partition=None, delete_at_nodes=None):
-    #    headers = [dict(req.headers.iteritems())
-    #               for _junk in range(n_outgoing)]
-
-    #    for header in headers:
-    #        header['Connection'] = 'close'
-
-    #    for i, container in enumerate(containers):
-    #        i = i % len(headers)
-
-    #        headers[i]['X-Container-Partition'] = container_partition
-    #        headers[i]['X-Container-Host'] = csv_append(
-    #            headers[i].get('X-Container-Host'),
-    #            '%(ip)s:%(port)s' % container)
-    #        headers[i]['X-Container-Device'] = csv_append(
-    #            headers[i].get('X-Container-Device'),
-    #            container['device'])
-
-    #    for i, node in enumerate(delete_at_nodes or []):
-    #        i = i % len(headers)
-
-    #        headers[i]['X-Delete-At-Partition'] = delete_at_partition
-    #        headers[i]['X-Delete-At-Host'] = csv_append(
-    #            headers[i].get('X-Delete-At-Host'),
-    #            '%(ip)s:%(port)s' % node)
-    #        headers[i]['X-Delete-At-Device'] = csv_append(
-    #            headers[i].get('X-Delete-At-Device'),
-    #            node['device'])
-
-    #    return headers
 
     # Almost same protocol as Controller.container_info(), but for LFS.
     # We do not return partition or nodes, as they make no sense in LFS.
@@ -1405,6 +1304,121 @@ class LFSObjectController(Controller):
         resp.last_modified = float(req.headers['X-Timestamp'])
         return resp
 
+    #@public
+    #@cors_validation
+    #@delay_denial
+    @public
+    def POST(self, req):
+        """HTTP POST request handler."""
+        if 'x-delete-after' in req.headers:
+            try:
+                x_delete_after = int(req.headers['x-delete-after'])
+            except ValueError:
+                return HTTPBadRequest(request=req,
+                                      content_type='text/plain',
+                                      body='Non-integer X-Delete-After')
+            req.headers['x-delete-at'] = '%d' % (time.time() + x_delete_after)
+
+        #if self.app.object_post_as_copy:
+        #    req.method = 'PUT'
+        #    req.path_info = '/%s/%s/%s' % (
+        #        self.account_name, self.container_name, self.object_name)
+        #    req.headers['Content-Length'] = 0
+        #    req.headers['X-Copy-From'] = quote('/%s/%s' % (self.container_name,
+        #                                       self.object_name))
+        #    req.headers['X-Fresh-Metadata'] = 'true'
+        #    req.environ['swift_versioned_copy'] = True
+        #    resp = self.PUT(req)
+        #    # Older editions returned 202 Accepted on object POSTs, so we'll
+        #    # convert any 201 Created responses to that for compatibility with
+        #    # picky clients.
+        #    if resp.status_int != HTTP_CREATED:
+        #        return resp
+        #    return HTTPAccepted(request=req)
+
+        #error_response = check_metadata(req, 'object')
+        #if error_response:
+        #    return error_response
+
+        container_info = self._container_info(
+            self.account_name, self.container_name,
+            account_autocreate=self.app.account_autocreate)
+        req.acl = container_info['write_acl']
+        if 'swift.authorize' in req.environ:
+            aresp = req.environ['swift.authorize'](req)
+            if aresp:
+                return aresp
+        if 'x-delete-at' in req.headers:
+            try:
+                x_delete_at = int(req.headers['x-delete-at'])
+                if x_delete_at < time.time():
+                    return HTTPBadRequest(
+                        body='X-Delete-At in past', request=req,
+                        content_type='text/plain')
+            except ValueError:
+                return HTTPBadRequest(request=req,
+                                      content_type='text/plain',
+                                      body='Non-integer X-Delete-At')
+            delete_at_container = str(
+                x_delete_at /
+                self.app.expiring_objects_container_divisor *
+                self.app.expiring_objects_container_divisor)
+            # Not in LFS.
+            #delete_at_part, delete_at_nodes = \
+            #    self.app.container_ring.get_nodes(
+            #        self.app.expiring_objects_account, delete_at_container)
+            delete_at_part = delete_at_nodes = None
+        else:
+            delete_at_part = delete_at_nodes = None
+        req.headers['X-Timestamp'] = normalize_timestamp(time.time())
+
+        new_delete_at = int(req.headers.get('X-Delete-At') or 0)
+        if new_delete_at and new_delete_at < time.time():
+            return HTTPBadRequest(body='X-Delete-At in past', request=req,
+                                  content_type='text/plain')
+        #if self.mount_check and not check_mount(self.devices, device):
+        #    return HTTPInsufficientStorage(drive=device, request=req)
+        pbroker = self.plugin_class(self.app, self.account_name,
+                                    self.container_name, self.object_name,
+                                    False)
+        if not pbroker.exists():
+            return HTTPNotFound(request=req)
+        try:
+            pbroker.get_data_file_size()
+        except (DiskFileError, DiskFileNotExist):
+            pbroker.quarantine()
+            return HTTPNotFound(request=req)
+        metadata = {'X-Timestamp': req.headers['x-timestamp']}
+        # XXX Swift object server does not inherit explicitly, yet works. How?
+        for meta_key in self.retained_meta_keys:
+            if meta_key in pbroker.metadata:
+                metadata[meta_key] = pbroker.metadata[meta_key]
+        metadata.update(val for val in req.headers.iteritems()
+                        if val[0].lower().startswith('x-object-meta-'))
+        for header_key in self.allowed_headers:
+            if header_key in req.headers:
+                header_caps = header_key.title()
+                metadata[header_caps] = req.headers[header_key]
+        # XXX Implement this.
+        #old_delete_at = int(pbroker.metadata.get('X-Delete-At') or 0)
+        #if old_delete_at != new_delete_at:
+        #    if new_delete_at:
+        #        self.delete_at_update('PUT', new_delete_at,
+        #                              self.account_name, self.container_name,
+        #                              self.object_name, req.headers, device)
+        #    if old_delete_at:
+        #        self.delete_at_update('DELETE', old_delete_at,
+        #                              self.account_name, self.container_name,
+        #                              self.object_name, req.headers, device)
+
+        # 4.3.6. Update Object Metadata
+        #    A POST request will delete all existing metadata added with
+        #    a previous PUT/POST.
+        # XXX Okay, here it puts the metatada whole. Fine. But elsewhere?
+        # Audit uses of update_metadata, see if they meant put_metadata.
+        pbroker.put_metadata(metadata)
+        return HTTPAccepted(request=req)
+
     #API
     #@public
     #@cors_validation
@@ -1711,55 +1725,6 @@ class LFSObjectController(Controller):
     #            '%s-%s/%s/%s' % (delete_at, account, container, obj),
     #            host, partition, contdevice, headers_out, objdevice)
 
-    #tbd - back-end implementation
-    #@public
-    #@timing_stats
-    #def POST(self, request):
-    #    """Handle HTTP POST requests for the Swift Object Server."""
-    #    try:
-    #        device, partition, account, container, obj = \
-    #            split_path(unquote(request.path), 5, 5, True)
-    #        validate_device_partition(device, partition)
-    #    except ValueError, err:
-    #        return HTTPBadRequest(body=str(err), request=request,
-    #                              content_type='text/plain')
-    #    if 'x-timestamp' not in request.headers or \
-    #            not check_float(request.headers['x-timestamp']):
-    #        return HTTPBadRequest(body='Missing timestamp', request=request,
-    #                              content_type='text/plain')
-    #    new_delete_at = int(request.headers.get('X-Delete-At') or 0)
-    #    if new_delete_at and new_delete_at < time.time():
-    #        return HTTPBadRequest(body='X-Delete-At in past', request=request,
-    #                              content_type='text/plain')
-    #    if self.mount_check and not check_mount(self.devices, device):
-    #        return HTTPInsufficientStorage(drive=device, request=request)
-    #    file = DiskFile(self.devices, device, partition, account, container,
-    #                    obj, self.logger, disk_chunk_size=self.disk_chunk_size)
-
-    #    if file.is_deleted() or file.is_expired():
-    #        return HTTPNotFound(request=request)
-    #    try:
-    #        file.get_data_file_size()
-    #    except (DiskFileError, DiskFileNotExist):
-    #        file.quarantine()
-    #        return HTTPNotFound(request=request)
-    #    metadata = {'X-Timestamp': request.headers['x-timestamp']}
-    #    metadata.update(val for val in request.headers.iteritems()
-    #                    if val[0].lower().startswith('x-object-meta-'))
-    #    for header_key in self.allowed_headers:
-    #        if header_key in request.headers:
-    #            header_caps = header_key.title()
-    #            metadata[header_caps] = request.headers[header_key]
-    #    old_delete_at = int(file.metadata.get('X-Delete-At') or 0)
-    #    if old_delete_at != new_delete_at:
-    #        if new_delete_at:
-    #            self.delete_at_update('PUT', new_delete_at, account, container,
-    #                                  obj, request.headers, device)
-    #        if old_delete_at:
-    #            self.delete_at_update('DELETE', old_delete_at, account,
-    #                                  container, obj, request.headers, device)
-    #    file.put_metadata(metadata)
-    #    return HTTPAccepted(request=request)
 
     #@public
     #@timing_stats
@@ -2051,7 +2016,8 @@ class LFSPlugin(object):
     #  #get_container_timestamp(self)
     #    This is something we postponed implementing, hoping that get_info()
     #    be sufficient. Used in HEAD request by legacy code.
-    #  update_metadata(self, metadata)
+    #  update_metadata(self, metadata_updates)
+    #    The argument is a list of (key, (value, timestamp)).
     #  update_put_timestamp(self, timestamp)
     #    Note that timestamps are always strings, not floats or ints. It may
     #    be unpleasant for plugins, but helps Swift to form HTTP headers.
@@ -2073,6 +2039,8 @@ class LFSPlugin(object):
     #    XXX os.write() seems like an unnecessary visibility into plugin
     #  put(self, fd, metadata)
     #    Aping DiskFile again. May change API when we get rid of fd.
+    #  put_metadata(self, metadata)
+    #    Like put(), only not changing the body of the object.
     #  unlinkold(self, timestamp)
     #  get_data_file_size(self)
     #  quarantine(self)

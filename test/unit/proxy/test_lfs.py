@@ -424,15 +424,100 @@ class TestProxyServerLFS(unittest.TestCase):
         self._test_POST_HEAD_metadata(_sg)
         self._test_POST_HEAD_metadata(_sp)
 
-    # XXX write a test for container listings with marker and delimiter 4.2.1.3
+    # Test if POST works at all.
+    def _test_object_POST(self, state):
+        prolis = state.sockets[0]
+        prosrv = state.servers[0]
+        # This container is pre-created. Object is not.
+        path = '/v1/a/c/o'
 
-    # def test_object_POST(self):
+        # Create the object.
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        obj = 'test'
+        fd.write('PUT %s HTTP/1.1\r\n'
+                 'Host: localhost\r\n'
+                 'Connection: close\r\n'
+                 'X-Storage-Token: t\r\n'
+                 'Content-Length: %s\r\n'
+                 'Content-Type: application/octet-stream\r\n'
+                 '\r\n%s' % (path, str(len(obj)),  obj))
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 201'
+        self.assertEqual(headers[:len(exp)], exp)
+
+        key = 'Test'
+        value = 'Value'
+
+        # Go whole hog on TCP connection so we test more this time.
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('POST %s HTTP/1.1\r\nHost: kvm-rei:8080\r\n'
+                 'Accept: */*\r\nX-Timestamp: 1\r\nX-Object-Meta-%s: %s\r\n'
+                 'Connection: close\r\nContent-Length: 0\r\n\r\n' %
+                 (path, key, value))
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 202'
+        self.assertEquals(headers[:len(exp)], exp)
+
+        # Get the metadata value and verify it
+        req = Request.blank(path, environ={'REQUEST_METHOD': 'HEAD'})
+        res = req.get_response(prosrv)
+        self.assertEquals(res.status_int, 204)
+        self.assertEquals(res.headers.get('x-object-meta-%s' % key), value)
+
+    # ... a couple more potentially interesting POST-on-object scenarios
+
+    #def test_PUT_POST_requires_container_exist(self):
+    #    with save_globals():
+    #        self.app.object_post_as_copy = False
+    #        self.app.memcache = FakeMemcacheReturnsNone()
+    #        controller = proxy_server.ObjectController(self.app, 'account',
+    #                                                   'container', 'object')
+
+    #        set_http_connect(200, 404, 404, 404, 200, 200, 200)
+    #        req = Request.blank('/a/c/o', environ={'REQUEST_METHOD': 'PUT'})
+    #        self.app.update_request(req)
+    #        resp = controller.PUT(req)
+    #        self.assertEquals(resp.status_int, 404)
+
+    #        set_http_connect(200, 404, 404, 404, 200, 200)
+    #        req = Request.blank('/a/c/o', environ={'REQUEST_METHOD': 'POST'},
+    #                            headers={'Content-Type': 'text/plain'})
+    #        self.app.update_request(req)
+    #        resp = controller.POST(req)
+    #        self.assertEquals(resp.status_int, 404)
+
+    #def test_POST_calls_authorize(self):
+    #    called = [False]
+
+    #    def authorize(req):
+    #        called[0] = True
+    #        return HTTPUnauthorized(request=req)
+    #    with save_globals():
+    #        self.app.object_post_as_copy = False
+    #        set_http_connect(200, 200, 201, 201, 201)
+    #        controller = proxy_server.ObjectController(self.app, 'account',
+    #                                                   'container', 'object')
+    #        req = Request.blank('/a/c/o', environ={'REQUEST_METHOD': 'POST'},
+    #                            headers={'Content-Length': '5'}, body='12345')
+    #        req.environ['swift.authorize'] = authorize
+    #        self.app.update_request(req)
+    #        res = controller.POST(req)
+    #    self.assert_(called[0])
+
+    def test_object_POST(self):
+        self._test_object_POST(_sg)
+        self._test_object_POST(_sp)
 
     # def test_DELETE(self):
 
     # XXX Test that numbers of objects are updated in containers
     # XXX Test that numbers of containers are updated in accounts
     # XXX Test lists of containers
+    # XXX write a test for container listings with marker and delimiter 4.2.1.3
     # XXX Test lists of objects (delimiter and marker)
 
 if __name__ == '__main__':

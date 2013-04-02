@@ -113,6 +113,16 @@ class LFSPluginGluster():
         fp.close()
         return ret
 
+    def put_metadata(self, metadata):
+        if self._type != 0:
+            return None
+        ret = self.broker.put_metadata(metadata)
+        # P3
+        fp = open("/tmp/dump","a")
+        print >>fp, "gluster put_meta", self.broker.data_file
+        fp.close()
+        return ret
+
     def __iter__(self):
         return self.broker.__iter__()
 
