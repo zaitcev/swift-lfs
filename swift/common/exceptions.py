@@ -42,7 +42,15 @@ class DiskFileError(SwiftException):
     pass
 
 
+class DiskFileCollision(SwiftException):
+    pass
+
+
 class DiskFileNotExist(SwiftException):
+    pass
+
+
+class DiskFileNoSpace(SwiftException):
     pass
 
 
@@ -102,3 +110,7 @@ class ListingIterNotAuthorized(ListingIterError):
 
     def __init__(self, aresp):
         self.aresp = aresp
+
+
+class SloSegmentError(SwiftException):
+    pass

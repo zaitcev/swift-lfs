@@ -16,8 +16,7 @@
 import unittest
 from test.unit import MockTrue
 
-from swift.common.swob import HTTPBadRequest, HTTPLengthRequired, \
-    HTTPRequestEntityTooLarge, Request
+from swift.common.swob import HTTPBadRequest, Request
 from swift.common.http import HTTP_REQUEST_ENTITY_TOO_LARGE, \
     HTTP_BAD_REQUEST, HTTP_LENGTH_REQUIRED
 from swift.common import constraints
@@ -202,6 +201,14 @@ class TestConstraints(unittest.TestCase):
                               unicode_sample,
                               valid_utf8_str]:
             self.assertTrue(constraints.check_utf8(true_argument))
+
+    def test_validate_bad_meta(self):
+        req = Request.blank(
+            '/v/a/c/o',
+            headers={'x-object-meta-hello':
+                     'ab' * constraints.MAX_HEADER_SIZE})
+        self.assertEquals(constraints.check_metadata(req, 'object').status_int,
+                          HTTP_BAD_REQUEST)
 
 if __name__ == '__main__':
     unittest.main()

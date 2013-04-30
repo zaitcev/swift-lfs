@@ -16,7 +16,7 @@
 import unittest
 
 from swift.common.middleware import keystoneauth
-from swift.common.swob import Request, Response, HTTPForbidden
+from swift.common.swob import Request, Response
 from swift.common.http import HTTP_FORBIDDEN
 
 
@@ -60,12 +60,31 @@ class SwiftAuth(unittest.TestCase):
         response_iter = iter([('200 OK', {}, '')])
         return keystoneauth.filter_factory({})(FakeApp(response_iter))
 
+    def test_invalid_request_authorized(self):
+        role = self.test_auth.reseller_admin_role
+        headers = self._get_identity_headers(role=role)
+        req = self._make_request('/', headers=headers)
+        resp = req.get_response(self._get_successful_middleware())
+        self.assertEqual(resp.status_int, 404)
+
+    def test_invalid_request_non_authorized(self):
+        req = self._make_request('/')
+        resp = req.get_response(self._get_successful_middleware())
+        self.assertEqual(resp.status_int, 404)
+
     def test_confirmed_identity_is_authorized(self):
         role = self.test_auth.reseller_admin_role
         headers = self._get_identity_headers(role=role)
         req = self._make_request('/v1/AUTH_acct/c', headers)
         resp = req.get_response(self._get_successful_middleware())
         self.assertEqual(resp.status_int, 200)
+
+    def test_detect_reseller_request(self):
+        role = self.test_auth.reseller_admin_role
+        headers = self._get_identity_headers(role=role)
+        req = self._make_request('/v1/AUTH_acct/c', headers)
+        req.get_response(self._get_successful_middleware())
+        self.assertTrue(req.environ.get('reseller_request'))
 
     def test_confirmed_identity_is_not_authorized(self):
         headers = self._get_identity_headers()
@@ -75,6 +94,12 @@ class SwiftAuth(unittest.TestCase):
 
     def test_anonymous_is_authorized_for_permitted_referrer(self):
         req = self._make_request(headers={'X_IDENTITY_STATUS': 'Invalid'})
+        req.acl = '.r:*'
+        resp = req.get_response(self._get_successful_middleware())
+        self.assertEqual(resp.status_int, 200)
+
+    def test_anonymous_with_validtoken_authorized_for_permitted_referrer(self):
+        req = self._make_request(headers={'X_IDENTITY_STATUS': 'Confirmed'})
         req.acl = '.r:*'
         resp = req.get_response(self._get_successful_middleware())
         self.assertEqual(resp.status_int, 200)
@@ -181,8 +206,20 @@ class TestAuthorize(unittest.TestCase):
         req = self._check_authenticate(identity=identity)
         self.assertTrue(req.environ.get('swift_owner'))
 
+    def test_authorize_succeeds_for_insensitive_reseller_admin(self):
+        roles = [self.test_auth.reseller_admin_role.upper()]
+        identity = self._get_identity(roles=roles)
+        req = self._check_authenticate(identity=identity)
+        self.assertTrue(req.environ.get('swift_owner'))
+
     def test_authorize_succeeds_as_owner_for_operator_role(self):
-        roles = self.test_auth.operator_roles.split(',')[0]
+        roles = self.test_auth.operator_roles.split(',')
+        identity = self._get_identity(roles=roles)
+        req = self._check_authenticate(identity=identity)
+        self.assertTrue(req.environ.get('swift_owner'))
+
+    def test_authorize_succeeds_as_owner_for_insensitive_operator_role(self):
+        roles = [r.upper() for r in self.test_auth.operator_roles.split(',')]
         identity = self._get_identity(roles=roles)
         req = self._check_authenticate(identity=identity)
         self.assertTrue(req.environ.get('swift_owner'))

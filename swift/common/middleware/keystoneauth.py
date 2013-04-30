@@ -81,9 +81,9 @@ class KeystoneAuth(object):
         self.logger = swift_utils.get_logger(conf, log_route='keystoneauth')
         self.reseller_prefix = conf.get('reseller_prefix', 'AUTH_').strip()
         self.operator_roles = conf.get('operator_roles',
-                                       'admin, swiftoperator')
+                                       'admin, swiftoperator').lower()
         self.reseller_admin_role = conf.get('reseller_admin_role',
-                                            'ResellerAdmin')
+                                            'ResellerAdmin').lower()
         config_is_admin = conf.get('is_admin', "false").lower()
         self.is_admin = swift_utils.config_true_value(config_is_admin)
         config_overrides = conf.get('allow_overrides', 't').lower()
@@ -106,6 +106,9 @@ class KeystoneAuth(object):
             environ['keystone.identity'] = identity
             environ['REMOTE_USER'] = identity.get('tenant')
             environ['swift.authorize'] = self.authorize
+            user_roles = (r.lower() for r in identity.get('roles', []))
+            if self.reseller_admin_role in user_roles:
+                environ['reseller_request'] = True
         else:
             self.logger.debug('Authorizing as anonymous')
             environ['swift.authorize'] = self.authorize_anonymous
@@ -173,7 +176,7 @@ class KeystoneAuth(object):
         except ValueError:
             return HTTPNotFound(request=req)
 
-        user_roles = env_identity.get('roles', [])
+        user_roles = [r.lower() for r in env_identity.get('roles', [])]
 
         # Give unconditional access to a user with the reseller_admin
         # role.
@@ -188,6 +191,12 @@ class KeystoneAuth(object):
             log_msg = 'user %s:%s, %s:%s, or *:%s allowed in ACL authorizing'
             self.logger.debug(log_msg % (tenant_name, user,
                                          tenant_id, user, user))
+            return
+
+        acl_authorized = self._authorize_unconfirmed_identity(req, obj,
+                                                              referrers,
+                                                              roles)
+        if acl_authorized:
             return
 
         # Check if a user tries to access an account that does not match their
@@ -217,16 +226,12 @@ class KeystoneAuth(object):
             req.environ['swift_owner'] = True
             return
 
-        authorized = self._authorize_unconfirmed_identity(req, obj, referrers,
-                                                          roles)
-        if authorized:
-            return
-        elif authorized is not None:
+        if acl_authorized is not None:
             return self.denied_response(req)
 
         # Check if we have the role in the userroles and allow it
         for user_role in user_roles:
-            if user_role in roles:
+            if user_role in (r.lower() for r in roles):
                 log_msg = 'user %s:%s allowed in ACL: %s authorizing'
                 self.logger.debug(log_msg % (tenant_name, user, user_role))
                 return

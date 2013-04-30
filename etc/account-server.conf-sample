@@ -47,6 +47,7 @@ use = egg:swift#account
 # set log_requests = True
 # set log_address = /dev/log
 # auto_create_account_prefix = .
+# max_clients = 1024
 
 [filter:healthcheck]
 use = egg:swift#healthcheck
@@ -88,10 +89,11 @@ use = egg:swift#recon
 # log_facility = LOG_LOCAL0
 # log_level = INFO
 # log_address = /dev/log
-# Will audit, at most, 1 account per device per interval
+# Will audit each account at most once per interval
 # interval = 1800
 # log_facility = LOG_LOCAL0
 # log_level = INFO
+# accounts_per_second = 200
 # recon_cache_path = /var/cache/swift
 
 [account-reaper]

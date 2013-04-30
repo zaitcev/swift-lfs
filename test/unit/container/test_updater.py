@@ -15,7 +15,6 @@
 
 import cPickle as pickle
 import os
-import sys
 import unittest
 from gzip import GzipFile
 from shutil import rmtree
@@ -35,6 +34,7 @@ class TestContainerUpdater(unittest.TestCase):
 
     def setUp(self):
         utils.HASH_PATH_SUFFIX = 'endcap'
+        utils.HASH_PATH_PREFIX = 'startcap'
         self.testdir = os.path.join(mkdtemp(), 'tmp_test_container_updater')
         rmtree(self.testdir, ignore_errors=1)
         os.mkdir(self.testdir)

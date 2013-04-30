@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import cPickle as pickle
-import json
 import os
 import unittest
 from gzip import GzipFile
@@ -37,6 +36,7 @@ class TestObjectUpdater(unittest.TestCase):
 
     def setUp(self):
         utils.HASH_PATH_SUFFIX = 'endcap'
+        utils.HASH_PATH_PREFIX = ''
         self.testdir = os.path.join(os.path.dirname(__file__),
                                     'object_updater')
         rmtree(self.testdir, ignore_errors=1)

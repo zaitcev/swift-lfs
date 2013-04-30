@@ -37,10 +37,12 @@ setup(
     packages=find_packages(exclude=['gluster', 'test', 'bin']),
     test_suite='nose.collector',
     classifiers=[
-        'Development Status :: 4 - Beta',
+        'Development Status :: 5 - Production/Stable',
         'License :: OSI Approved :: Apache Software License',
         'Operating System :: POSIX :: Linux',
+        'Programming Language :: Python',
         'Programming Language :: Python :: 2.6',
+        'Programming Language :: Python :: 2.7',
         'Environment :: No Input/Output (Daemon)',
         'Environment :: OpenStack',
     ],
@@ -87,6 +89,7 @@ setup(
         ],
         'paste.filter_factory': [
             'healthcheck=swift.common.middleware.healthcheck:filter_factory',
+            'crossdomain=swift.common.middleware.crossdomain:filter_factory',
             'memcache=swift.common.middleware.memcache:filter_factory',
             'ratelimit=swift.common.middleware.ratelimit:filter_factory',
             'cname_lookup=swift.common.middleware.cname_lookup:filter_factory',
@@ -102,7 +105,12 @@ setup(
             'bulk=swift.common.middleware.bulk:filter_factory',
             'container_quotas=swift.common.middleware.container_quotas:'
             'filter_factory',
+            'account_quotas=swift.common.middleware.account_quotas:'
+            'filter_factory',
             'proxy_logging=swift.common.middleware.proxy_logging:'
+            'filter_factory',
+            'slo=swift.common.middleware.slo:filter_factory',
+            'list_endpoints=swift.common.middleware.list_endpoints:'
             'filter_factory',
         ],
     },

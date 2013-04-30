@@ -73,7 +73,8 @@ General OS configuration and partitioning for each node
 
         cat >/etc/swift/swift.conf <<EOF
         [swift-hash]
-        # random unique string that can never change (DO NOT LOSE)
+        # random unique strings that can never change (DO NOT LOSE)
+        swift_hash_path_prefix = `od -t x8 -N 8 -A n </dev/random`
         swift_hash_path_suffix = `od -t x8 -N 8 -A n </dev/random`
         EOF
 
@@ -85,6 +86,26 @@ General OS configuration and partitioning for each node
 
         export STORAGE_LOCAL_NET_IP=10.1.2.3
         export PROXY_LOCAL_NET_IP=10.1.2.4
+
+#. Create directory /var/run/swift and change the ownership to the user and group
+   which Swift services will run under. Since the directory is only needed for runtime,
+   when system shuts down, the directory will be gone. It is necessary to have
+   the directory recreated when system is restarted. To do that, also add the
+   following lines into /etc/rc.local before line "exit 0".::
+
+        mkdir -p /var/run/swift
+        chown swift:swift /var/run/swift
+
+#. Create directory /var/cache/swift and /srv/node. Change the ownership of the
+   directory /var/cache/swift to the user and group which Swift account, container
+   or object services will run under. These directories are needed only for storage
+   node (account, container or object server). The ownership of /srv/node should
+   be root:root, this is to ensure that when storage disks unmounted unexpectedly,
+   the objects for swift will not be created in the directory /srv/node. If you have
+   a node only runs proxy server, you can skip this step.::
+
+        mkdir -p /var/cache/swift /srv/node/
+        chown swift:swift /var/cache/swift
 
 .. note::
     The random string of text in /etc/swift/swift.conf is
@@ -227,14 +248,15 @@ Configure the Storage nodes
         apt-get install swift-account swift-container swift-object xfsprogs
 
 #. For every device on the node, setup the XFS volume (/dev/sdb is used
-   as an example)::
+   as an example), add mounting option inode64 when your disk is bigger than
+   1TB to archive a better performance.::
 
         fdisk /dev/sdb  (set up a single partition)
-        mkfs.xfs -i size=1024 /dev/sdb1
+        mkfs.xfs -i size=512 /dev/sdb1
         echo "/dev/sdb1 /srv/node/sdb1 xfs noatime,nodiratime,nobarrier,logbufs=8 0 0" >> /etc/fstab
         mkdir -p /srv/node/sdb1
         mount /srv/node/sdb1
-        chown -R swift:swift /srv/node
+        chown swift:swift /srv/node/sdb1
 
 #. Create /etc/rsyncd.conf::
 

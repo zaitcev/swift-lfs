@@ -22,6 +22,8 @@ import struct
 from time import time
 import os
 from io import BufferedReader
+from hashlib import md5
+from itertools import chain
 
 from swift.common.utils import hash_path, validate_configuration, json
 from swift.common.ring.utils import tiers_for_dev
@@ -34,6 +36,10 @@ class RingData(object):
         self.devs = devs
         self._replica2part2dev_id = replica2part2dev_id
         self._part_shift = part_shift
+
+        for dev in self.devs:
+            if dev is not None:
+                dev.setdefault("region", 1)
 
     @classmethod
     def deserialize_v1(cls, gz_file):
@@ -163,7 +169,7 @@ class Ring(object):
 
     @property
     def replica_count(self):
-        """Number of replicas used in the ring."""
+        """Number of replicas (full or partial) used in the ring."""
         return len(self._replica2part2dev_id)
 
     @property
@@ -188,9 +194,30 @@ class Ring(object):
         return getmtime(self.serialized_path) != self._mtime
 
     def _get_part_nodes(self, part):
+        part_nodes = []
         seen_ids = set()
-        return [self._devs[r[part]] for r in self._replica2part2dev_id
-                if not (r[part] in seen_ids or seen_ids.add(r[part]))]
+        for r2p2d in self._replica2part2dev_id:
+            if part < len(r2p2d):
+                dev_id = r2p2d[part]
+                if dev_id not in seen_ids:
+                    part_nodes.append(self.devs[dev_id])
+                seen_ids.add(dev_id)
+        return part_nodes
+
+    def get_part(self, account, container=None, obj=None):
+        """
+        Get the partition for an account/container/object.
+
+        :param account: account name
+        :param container: container name
+        :param obj: object name
+        :returns: the partition number
+        """
+        key = hash_path(account, container, obj, raw_digest=True)
+        if time() > self._rtime:
+            self._reload()
+        part = struct.unpack_from('>I', key)[0] >> self._part_shift
+        return part
 
     def get_part_nodes(self, part):
         """
@@ -236,15 +263,17 @@ class Ring(object):
                 hardware description
         ======  ===============================================================
         """
-        key = hash_path(account, container, obj, raw_digest=True)
-        if time() > self._rtime:
-            self._reload()
-        part = struct.unpack_from('>I', key)[0] >> self._part_shift
+        part = self.get_part(account, container, obj)
         return part, self._get_part_nodes(part)
 
     def get_more_nodes(self, part):
         """
         Generator to get extra nodes for a partition for hinted handoff.
+
+        The handoff nodes will try to be in zones other than the
+        primary zones, will take into account the device weights, and
+        will usually keep the same sequences of handoffs even with
+        ring changes.
 
         :param part: partition to get handoff nodes for
         :returns: generator of node dicts
@@ -253,22 +282,52 @@ class Ring(object):
         """
         if time() > self._rtime:
             self._reload()
-        used_tiers = set()
-        for part2dev_id in self._replica2part2dev_id:
-            for tier in tiers_for_dev(self._devs[part2dev_id[part]]):
-                used_tiers.add(tier)
+        primary_nodes = self._get_part_nodes(part)
 
-        for level in self.tiers_by_length:
-            tiers = list(level)
-            while tiers:
-                tier = tiers.pop(part % len(tiers))
-                if tier in used_tiers:
-                    continue
-                for i in xrange(len(self.tier2devs[tier])):
-                    dev = self.tier2devs[tier][(part + i) %
-                                               len(self.tier2devs[tier])]
-                    if not dev.get('weight'):
-                        continue
-                    yield dev
-                    used_tiers.update(tiers_for_dev(dev))
-                    break
+        used = set(d['id'] for d in primary_nodes)
+        same_regions = set(d['region'] for d in primary_nodes)
+        same_zones = set((d['region'], d['zone']) for d in primary_nodes)
+
+        parts = len(self._replica2part2dev_id[0])
+        start = struct.unpack_from(
+            '>I', md5(str(part)).digest())[0] >> self._part_shift
+        inc = int(parts / 65536) or 1
+        # Multiple loops for execution speed; the checks and bookkeeping get
+        # simpler as you go along
+        for handoff_part in chain(xrange(start, parts, inc),
+                                  xrange(inc - ((parts - start) % inc),
+                                         start, inc)):
+            for part2dev_id in self._replica2part2dev_id:
+                if handoff_part < len(part2dev_id):
+                    dev_id = part2dev_id[handoff_part]
+                    dev = self._devs[dev_id]
+                    region = dev['region']
+                    zone = (dev['region'], dev['zone'])
+                    if dev_id not in used and region not in same_regions:
+                        yield dev
+                        used.add(dev_id)
+                        same_regions.add(region)
+                        same_zones.add(zone)
+
+        for handoff_part in chain(xrange(start, parts, inc),
+                                  xrange(inc - ((parts - start) % inc),
+                                         start, inc)):
+            for part2dev_id in self._replica2part2dev_id:
+                if handoff_part < len(part2dev_id):
+                    dev_id = part2dev_id[handoff_part]
+                    dev = self._devs[dev_id]
+                    zone = (dev['region'], dev['zone'])
+                    if dev_id not in used and zone not in same_zones:
+                        yield dev
+                        used.add(dev_id)
+                        same_zones.add(zone)
+
+        for handoff_part in chain(xrange(start, parts, inc),
+                                  xrange(inc - ((parts - start) % inc),
+                                         start, inc)):
+            for part2dev_id in self._replica2part2dev_id:
+                if handoff_part < len(part2dev_id):
+                    dev_id = part2dev_id[handoff_part]
+                    if dev_id not in used:
+                        yield self._devs[dev_id]
+                        used.add(dev_id)

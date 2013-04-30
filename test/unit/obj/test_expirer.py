@@ -13,15 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
-from sys import exc_info
+import urllib
 from time import time
 from unittest import main, TestCase
 from test.unit import FakeLogger
 
+import mock
+
 from swift.common import internal_client
 from swift.obj import expirer
-from swift.proxy.server import Application
 
 
 def not_random():
@@ -402,14 +402,13 @@ class TestObjectExpirer(TestCase):
                                    'interval': interval})
         orig_random = expirer.random
         orig_sleep = expirer.sleep
-        exc = None
         try:
             expirer.random = not_random
             expirer.sleep = not_sleep
             x.run_once = raise_system_exit
             x.run_forever()
         except SystemExit, err:
-            exc = err
+            pass
         finally:
             expirer.random = orig_random
             expirer.sleep = orig_sleep
@@ -428,13 +427,12 @@ class TestObjectExpirer(TestCase):
         x = expirer.ObjectExpirer({})
         x.logger = FakeLogger()
         orig_sleep = expirer.sleep
-        exc = None
         try:
             expirer.sleep = not_sleep
             x.run_once = raise_exceptions
             x.run_forever()
         except SystemExit, err:
-            exc = err
+            pass
         finally:
             expirer.sleep = orig_sleep
         self.assertEquals(str(err), 'exiting exception 2')
@@ -516,6 +514,17 @@ class TestObjectExpirer(TestCase):
         finally:
             pass
         self.assertEquals(503, exc.resp.status_int)
+
+    def test_delete_actual_object_quotes(self):
+        name = 'this name should get quoted'
+        timestamp = '1366063156.863045'
+        x = expirer.ObjectExpirer({})
+        x.swift.make_request = mock.MagicMock()
+        x.delete_actual_object(name, timestamp)
+        x.swift.make_request.assert_called_once()
+        self.assertEquals(x.swift.make_request.call_args[0][1],
+                          '/v1/' + urllib.quote(name))
+
 
 if __name__ == '__main__':
     main()

@@ -13,27 +13,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import errno
 import os
 import socket
 import sys
-from httplib import HTTPException
 from time import sleep
-from nose import SkipTest
-from ConfigParser import MissingSectionHeaderError
 
 from test import get_config
 
-from swiftclient import get_auth, http_connection
+from swiftclient import get_auth, http_connection, HTTPException
 
 conf = get_config('func_test')
+web_front_end = conf.get('web_front_end', 'integral')
+normalized_urls = conf.get('normalized_urls', False)
 
 # If no conf was read, we will fall back to old school env vars
 swift_test_auth = os.environ.get('SWIFT_TEST_AUTH')
 swift_test_user = [os.environ.get('SWIFT_TEST_USER'), None, None]
 swift_test_key = [os.environ.get('SWIFT_TEST_KEY'), None, None]
+swift_test_tenant = ['', '', '']
+swift_test_perm = ['', '', '']
 
 if conf:
+    swift_test_auth_version = str(conf.get('auth_version', '1'))
+
     swift_test_auth = 'http'
     if conf.get('auth_ssl', 'no').lower() in ('yes', 'true', 'on', '1'):
         swift_test_auth = 'https'
@@ -41,26 +43,48 @@ if conf:
         conf['auth_prefix'] = '/'
     try:
         swift_test_auth += \
-                '://%(auth_host)s:%(auth_port)s%(auth_prefix)sv1.0' % conf
+                '://%(auth_host)s:%(auth_port)s%(auth_prefix)s' % conf
     except KeyError:
         pass  # skip
-    if 'account' in conf:
-        swift_test_user[0] = '%(account)s:%(username)s' % conf
+
+    if swift_test_auth_version == "1":
+        swift_test_auth += 'v1.0'
+
+        if 'account' in conf:
+            swift_test_user[0] = '%(account)s:%(username)s' % conf
+        else:
+            swift_test_user[0] = '%(username)s' % conf
+        swift_test_key[0] = conf['password']
+        try:
+            swift_test_user[1] = '%s%s' % \
+               ('%s:' % conf['account2'] if 'account2' in conf else '',
+                conf['username2'])
+            swift_test_key[1] = conf['password2']
+        except KeyError, err:
+            pass  # old conf, no second account tests can be run
+        try:
+            swift_test_user[2] = '%s%s' % ('%s:' % conf['account'] if 'account'
+                                           in conf else '', conf['username3'])
+            swift_test_key[2] = conf['password3']
+        except KeyError, err:
+            pass  # old conf, no third account tests can be run
+
+        for _ in range(3):
+            swift_test_perm[_] = swift_test_user[_]
+
     else:
-        swift_test_user[0] = '%(username)s' % conf
-    swift_test_key[0] = conf['password']
-    try:
-        swift_test_user[1] = '%s%s' % ('%s:' % conf['account2'] if 'account2'
-                                       in conf else '', conf['username2'])
+        swift_test_user[0] = conf['username']
+        swift_test_tenant[0] = conf['account']
+        swift_test_key[0] = conf['password']
+        swift_test_user[1] = conf['username2']
+        swift_test_tenant[1] = conf['account2']
         swift_test_key[1] = conf['password2']
-    except KeyError, err:
-        pass  # old conf, no second account tests can be run
-    try:
-        swift_test_user[2] = '%s%s' % ('%s:' % conf['account'] if 'account'
-                                       in conf else '', conf['username3'])
+        swift_test_user[2] = conf['username3']
+        swift_test_tenant[2] = conf['account']
         swift_test_key[2] = conf['password3']
-    except KeyError, err:
-        pass  # old conf, no third account tests can be run
+
+        for _ in range(3):
+            swift_test_perm[_] = swift_test_tenant[_] + ':' + swift_test_user[_]
 
 skip = not all([swift_test_auth, swift_test_user[0], swift_test_key[0]])
 if skip:
@@ -111,7 +135,11 @@ def retry(func, *args, **kwargs):
             if not url[use_account] or not token[use_account]:
                 url[use_account], token[use_account] = \
                     get_auth(swift_test_auth, swift_test_user[use_account],
-                             swift_test_key[use_account])
+                             swift_test_key[use_account],
+                             snet=False,
+                             tenant_name=swift_test_tenant[use_account],
+                             auth_version=swift_test_auth_version,
+                             os_options={})
                 parsed[use_account] = conn[use_account] = None
             if not parsed[use_account] or not conn[use_account]:
                 parsed[use_account], conn[use_account] = \
@@ -122,10 +150,10 @@ def retry(func, *args, **kwargs):
             if attempts > retries:
                 raise
             parsed[use_account] = conn[use_account] = None
-        except AuthError, err:
+        except AuthError:
             url[use_account] = token[use_account] = None
             continue
-        except InternalServerError, err:
+        except InternalServerError:
             pass
         if attempts <= retries:
             sleep(backoff)

@@ -19,6 +19,7 @@ import unittest
 import datetime
 import re
 from StringIO import StringIO
+from urllib import quote
 
 import swift.common.swob
 
@@ -492,6 +493,14 @@ class TestRequest(unittest.TestCase):
         except ValueError, err:
             self.assertEquals(str(err), 'Invalid path: o%0An%20e')
 
+    def test_unicode_path(self):
+        req = swift.common.swob.Request.blank(u'/\u2661')
+        self.assertEquals(req.path, quote(u'/\u2661'.encode('utf-8')))
+
+    def test_unicode_query(self):
+        req = swift.common.swob.Request.blank(u'/')
+        req.query_string = u'x=\u2661'
+        self.assertEquals(req.params['x'], u'\u2661'.encode('utf-8'))
 
 
 class TestStatusMap(unittest.TestCase):
@@ -571,14 +580,16 @@ class TestResponse(unittest.TestCase):
             '/', environ={'HTTP_HOST': 'somehost'})
         resp = self._get_response()
         resp.location = '/something'
-        body = ''.join(resp(req.environ, start_response))
+        # read response
+        ''.join(resp(req.environ, start_response))
         self.assertEquals(resp.location, 'http://somehost/something')
 
         req = swift.common.swob.Request.blank(
             '/', environ={'HTTP_HOST': 'somehost:80'})
         resp = self._get_response()
         resp.location = '/something'
-        body = ''.join(resp(req.environ, start_response))
+        # read response
+        ''.join(resp(req.environ, start_response))
         self.assertEquals(resp.location, 'http://somehost/something')
 
         req = swift.common.swob.Request.blank(
@@ -586,7 +597,8 @@ class TestResponse(unittest.TestCase):
                           'wsgi.url_scheme': 'http'})
         resp = self._get_response()
         resp.location = '/something'
-        body = ''.join(resp(req.environ, start_response))
+        # read response
+        ''.join(resp(req.environ, start_response))
         self.assertEquals(resp.location, 'http://somehost:443/something')
 
         req = swift.common.swob.Request.blank(
@@ -594,7 +606,8 @@ class TestResponse(unittest.TestCase):
                           'wsgi.url_scheme': 'https'})
         resp = self._get_response()
         resp.location = '/something'
-        body = ''.join(resp(req.environ, start_response))
+        # read response
+        ''.join(resp(req.environ, start_response))
         self.assertEquals(resp.location, 'https://somehost/something')
 
     def test_location_rewrite_no_host(self):
@@ -605,7 +618,8 @@ class TestResponse(unittest.TestCase):
         del req.environ['HTTP_HOST']
         resp = self._get_response()
         resp.location = '/something'
-        body = ''.join(resp(req.environ, start_response))
+        # read response
+        ''.join(resp(req.environ, start_response))
         self.assertEquals(resp.location, 'http://local/something')
 
         req = swift.common.swob.Request.blank(
@@ -613,7 +627,8 @@ class TestResponse(unittest.TestCase):
         del req.environ['HTTP_HOST']
         resp = self._get_response()
         resp.location = '/something'
-        body = ''.join(resp(req.environ, start_response))
+        # read response
+        ''.join(resp(req.environ, start_response))
         self.assertEquals(resp.location, 'http://local:81/something')
 
     def test_location_no_rewrite(self):
@@ -623,7 +638,8 @@ class TestResponse(unittest.TestCase):
             '/', environ={'HTTP_HOST': 'somehost'})
         resp = self._get_response()
         resp.location = 'http://www.google.com/'
-        body = ''.join(resp(req.environ, start_response))
+        # read response
+        ''.join(resp(req.environ, start_response))
         self.assertEquals(resp.location, 'http://www.google.com/')
 
     def test_app_iter(self):
@@ -646,7 +662,8 @@ class TestResponse(unittest.TestCase):
         resp.conditional_response = True
         resp.content_length = 10
 
-        content = ''.join(resp._response_iter(resp.app_iter, ''))
+        # read response
+        ''.join(resp._response_iter(resp.app_iter, ''))
 
         self.assertEquals(resp.status, '200 OK')
         self.assertEqual(10, resp.content_length)
@@ -663,7 +680,8 @@ class TestResponse(unittest.TestCase):
         resp.conditional_response = True
         resp.content_length = 10
 
-        content = ''.join(resp._response_iter(resp.app_iter, ''))
+        # read response
+        ''.join(resp._response_iter(resp.app_iter, ''))
 
         self.assertEquals(resp.status, '200 OK')
         self.assertEqual(10, resp.content_length)

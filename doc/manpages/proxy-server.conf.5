@@ -78,6 +78,10 @@ Syslog log facility. The default is LOG_LOCAL0.
 Logging level. The default is INFO.
 .IP \fBlog_address\fR
 Logging address. The default is /dev/log.
+.IP \fBtrans_id_suffix\fR
+This optional suffix (default is empty) that would be appended to the swift transaction
+id allows one to easily figure out from which cluster that X-Trans-Id belongs to.
+This is very useful when one is managing more than one swift cluster.
 .RE
 .PD
 
@@ -431,7 +435,7 @@ Python regular expressions of substrings that will not be allowed in a name.
 
 
 .RS 0
-.IP "\fB[filter:proxy_logging]\fR"
+.IP "\fB[filter:proxy-logging]\fR"
 .RE
 
 Logging for the proxy server now lives in this middleware.
@@ -533,6 +537,12 @@ object.  The default is 10 segments.
 .IP \fBrate_limit_segments_per_sec\fR
 Once segment rate-limiting kicks in for an object, limit segments served to N
 per second.  The default is 1.
+.IP \fBmax_clients\fR
+Maximum number of clients one worker can process simultaneously (it will
+actually accept(2) N + 1). Setting this to one (1) will only handle one request
+at a time, without accepting another request concurrently. By increasing the
+number of workers to a much higher value, one can reduce the impact of slow file system
+operations in one request from negatively impacting other requests. The default is 1024.
 .RE
 .PD
 

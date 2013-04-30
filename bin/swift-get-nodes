@@ -98,7 +98,7 @@ elif len(args) == 1:
 more_nodes = []
 for more_node in ring.get_more_nodes(part):
     more_nodes.append(more_node)
-    if not options.all and len(more_nodes) >= ring.replica_count:
+    if not options.all and len(more_nodes) >= len(nodes):
         break
 
 print '\nAccount \t%s' % account
@@ -123,17 +123,20 @@ for mnode in more_nodes:
         % (mnode['ip'], mnode['port'], mnode['device'], part,
            urllib.quote(target))
 print "\n"
+print 'Use your own device location of servers:'
+print 'such as "export DEVICE=/srv/node"'
 for node in nodes:
     if hash_str:
-        print 'ssh %s "ls -lah /srv/node/%s/%s/%s/%s/%s/"' % (
+        print 'ssh %s "ls -lah ${DEVICE:-/srv/node}/%s/%s/%s/%s/%s/"' % (
             node['ip'], node['device'], loc, part, hash_str[-3:], hash_str)
     else:
-        print 'ssh %s "ls -lah /srv/node/%s/%s/%s/"' % (
+        print 'ssh %s "ls -lah ${DEVICE:-/srv/node}/%s/%s/%s/"' % (
             node['ip'], node['device'], loc, part)
 for mnode in more_nodes:
     if hash_str:
-        print 'ssh %s "ls -lah /srv/node/%s/%s/%s/%s/%s/" # [Handoff]' % (
-            mnode['ip'], mnode['device'], loc, part, hash_str[-3:], hash_str)
+        print 'ssh %s "ls -lah ${DEVICE:-/srv/node}/%s/%s/%s/%s/%s/" '\
+              '# [Handoff]' % (mnode['ip'], mnode['device'], loc, part,
+                               hash_str[-3:], hash_str)
     else:
-        print 'ssh %s "ls -lah /srv/node/%s/%s/%s/" # [Handoff]' % (
+        print 'ssh %s "ls -lah ${DEVICE:-/srv/node}/%s/%s/%s/" # [Handoff]' % (
             mnode['ip'], mnode['device'], loc, part)

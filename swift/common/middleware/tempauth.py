@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from time import gmtime, strftime, time
+from time import time
 from traceback import format_exc
-from urllib import quote, unquote
+from urllib import unquote
 from uuid import uuid4
 from hashlib import sha1
 import hmac
@@ -29,7 +29,6 @@ from swift.common.swob import HTTPBadRequest, HTTPForbidden, HTTPNotFound, \
 from swift.common.middleware.acl import clean_acl, parse_acl, referrer_allowed
 from swift.common.utils import cache_from_env, get_logger, \
     split_path, config_true_value
-from swift.common.http import HTTP_CLIENT_CLOSED_REQUEST
 
 
 class TempAuth(object):
@@ -150,6 +149,8 @@ class TempAuth(object):
                     '%s,%s' % (user, 's3' if s3 else token)
                 env['swift.authorize'] = self.authorize
                 env['swift.clean_acl'] = clean_acl
+                if '.reseller_admin' in groups:
+                    env['reseller_request'] = True
             else:
                 # Unauthorized token
                 if self.reseller_prefix:
@@ -245,38 +246,65 @@ class TempAuth(object):
         except ValueError:
             self.logger.increment('errors')
             return HTTPNotFound(request=req)
+
         if not account or not account.startswith(self.reseller_prefix):
+            self.logger.debug("Account name: %s doesn't start with "
+                              "reseller_prefix: %s."
+                              % (account, self.reseller_prefix))
             return self.denied_response(req)
+
         user_groups = (req.remote_user or '').split(',')
+        account_user = user_groups[1] if len(user_groups) > 1 else None
+
         if '.reseller_admin' in user_groups and \
                 account != self.reseller_prefix and \
                 account[len(self.reseller_prefix)] != '.':
             req.environ['swift_owner'] = True
+            self.logger.debug("User %s has reseller admin authorizing."
+                              % account_user)
             return None
+
         if account in user_groups and \
                 (req.method not in ('DELETE', 'PUT') or container):
             # If the user is admin for the account and is not trying to do an
             # account DELETE or PUT...
             req.environ['swift_owner'] = True
+            self.logger.debug("User %s has admin authorizing."
+                              % account_user)
             return None
+
         if (req.environ.get('swift_sync_key')
                 and (req.environ['swift_sync_key'] ==
                      req.headers.get('x-container-sync-key', None))
                 and 'x-timestamp' in req.headers):
+            self.logger.debug("Allow request with container sync-key: %s."
+                              % req.environ['swift_sync_key'])
             return None
+
         if req.method == 'OPTIONS':
             #allow OPTIONS requests to proceed as normal
+            self.logger.debug("Allow OPTIONS request.")
             return None
+
         referrers, groups = parse_acl(getattr(req, 'acl', None))
         if referrer_allowed(req.referer, referrers):
             if obj or '.rlistings' in groups:
+                self.logger.debug("Allow authorizing %s via referer ACL."
+                                  % req.referer)
                 return None
+            self.logger.debug("Disallow authorizing %s via referer ACL."
+                              % req.referer)
             return self.denied_response(req)
+
         if not req.remote_user:
             return self.denied_response(req)
+
         for user_group in user_groups:
             if user_group in groups:
+                self.logger.debug("User %s allowed in ACL: %s authorizing."
+                                  % (account_user, user_group))
                 return None
+
         return self.denied_response(req)
 
     def denied_response(self, req):

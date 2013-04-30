@@ -21,6 +21,7 @@ import os
 import pwd
 import sys
 import time
+import uuid
 import functools
 from hashlib import md5
 from random import random, shuffle
@@ -64,7 +65,6 @@ logging._levelNames[NOTICE] = 'NOTICE'
 SysLogHandler.priority_map['NOTICE'] = 'notice'
 
 # These are lazily pulled from libc elsewhere
-_sys_fsync = None
 _sys_fallocate = None
 _posix_fadvise = None
 
@@ -77,10 +77,16 @@ FALLOCATE_RESERVE = 0
 # will end up with would also require knowing this suffix.
 hash_conf = ConfigParser()
 HASH_PATH_SUFFIX = ''
+HASH_PATH_PREFIX = ''
 if hash_conf.read('/etc/swift/swift.conf'):
     try:
         HASH_PATH_SUFFIX = hash_conf.get('swift-hash',
                                          'swift_hash_path_suffix')
+    except (NoSectionError, NoOptionError):
+        pass
+    try:
+        HASH_PATH_PREFIX = hash_conf.get('swift-hash',
+                                         'swift_hash_path_prefix')
     except (NoSectionError, NoOptionError):
         pass
 
@@ -135,8 +141,9 @@ def noop_libc_function(*args):
 
 
 def validate_configuration():
-    if HASH_PATH_SUFFIX == '':
-        sys.exit("Error: [swift-hash]: swift_hash_path_suffix missing "
+    if not HASH_PATH_SUFFIX and not HASH_PATH_PREFIX:
+        sys.exit("Error: [swift-hash]: both swift_hash_path_suffix "
+                 "and swift_hash_path_prefix are missing "
                  "from /etc/swift/swift.conf")
 
 
@@ -170,6 +177,20 @@ def get_param(req, name, default=None):
     if value and not isinstance(value, unicode):
         value.decode('utf8')    # Ensure UTF8ness
     return value
+
+
+def generate_trans_id(trans_id_suffix):
+    return 'tx%s-%010x%s' % (
+        uuid.uuid4().hex[:21], time.time(), trans_id_suffix)
+
+
+def get_trans_id_time(trans_id):
+    if len(trans_id) >= 34 and trans_id[:2] == 'tx' and trans_id[23] == '-':
+        try:
+            return int(trans_id[24:34], 16)
+        except ValueError:
+            pass
+    return None
 
 
 class FallocateWrapper(object):
@@ -231,46 +252,31 @@ def fallocate(fd, size):
         raise OSError(err, 'Unable to fallocate(%s)' % size)
 
 
-class FsyncWrapper(object):
-
-    def __init__(self):
-        if hasattr(os, 'fdatasync'):
-            self.func_name = 'fdatasync'
-            self.fsync = os.fdatasync
-            self.fcntl_flag = None
-        elif hasattr(fcntl, 'F_FULLFSYNC'):
-            self.func_name = 'fcntl'
-            self.fsync = fcntl.fcntl
-            self.fcntl_flag = fcntl.F_FULLFSYNC
-        else:
-            self.func_name = 'fsync'
-            self.fsync = os.fsync
-            self.fcntl_flag = None
-
-    def __call__(self, fd):
-        args = {
-            'fdatasync': (fd, ),
-            'fsync': (fd, ),
-            'fcntl': (fd, self.fcntl_flag)
-        }
-        return self.fsync(*args[self.func_name])
-
-
 def fsync(fd):
     """
-    Write buffered changes to disk.
+    Sync modified file data and metadata to disk.
 
     :param fd: file descriptor
     """
+    if hasattr(fcntl, 'F_FULLSYNC'):
+        try:
+            fcntl.fcntl(fd, fcntl.F_FULLSYNC)
+        except IOError as e:
+            raise OSError(e.errno, 'Unable to F_FULLSYNC(%s)' % fd)
+    else:
+        os.fsync(fd)
 
-    global _sys_fsync
-    if _sys_fsync is None:
-        _sys_fsync = FsyncWrapper()
 
-    ret = _sys_fsync(fd)
-    err = ctypes.get_errno()
-    if ret and err != 0:
-        raise OSError(err, 'Unable to fsync(%s)' % fd)
+def fdatasync(fd):
+    """
+    Sync modified file data to disk.
+
+    :param fd: file descriptor
+    """
+    try:
+        os.fdatasync(fd)
+    except AttributeError:
+        fsync(fd)
 
 
 def drop_buffer_cache(fd, offset, length):
@@ -508,6 +514,12 @@ class StatsdClient(object):
         return self.timing(metric, (time.time() - orig_time) * 1000,
                            sample_rate)
 
+    def transfer_rate(self, metric, elapsed_time, byte_xfer, sample_rate=None):
+        if byte_xfer:
+            return self.timing(metric,
+                               elapsed_time * 1000 / byte_xfer * 1000,
+                               sample_rate)
+
 
 def timing_stats(**dec_kwargs):
     """
@@ -662,6 +674,7 @@ class LogAdapter(logging.LoggerAdapter, object):
     decrement = statsd_delegate('decrement')
     timing = statsd_delegate('timing')
     timing_since = statsd_delegate('timing_since')
+    transfer_rate = statsd_delegate('transfer_rate')
 
 
 class SwiftLogFormatter(logging.Formatter):
@@ -675,7 +688,24 @@ class SwiftLogFormatter(logging.Formatter):
             # Catch log messages that were not initiated by swift
             # (for example, the keystone auth middleware)
             record.server = record.name
-        msg = logging.Formatter.format(self, record)
+
+        # Included from Python's logging.Formatter and then altered slightly to
+        # replace \n with #012
+        record.message = record.getMessage()
+        if self._fmt.find('%(asctime)') >= 0:
+            record.asctime = self.formatTime(record, self.datefmt)
+        msg = (self._fmt % record.__dict__).replace('\n', '#012')
+        if record.exc_info:
+            # Cache the traceback text to avoid converting it multiple times
+            # (it's constant anyway)
+            if not record.exc_text:
+                record.exc_text = self.formatException(
+                    record.exc_info).replace('\n', '#012')
+        if record.exc_text:
+            if msg[-3:] != '#012':
+                msg = msg + '#012'
+            msg = msg + record.exc_text
+
         if (hasattr(record, 'txn_id') and record.txn_id and
                 record.levelno != logging.INFO and
                 record.txn_id not in msg):
@@ -983,9 +1013,11 @@ def hash_path(account, container=None, object=None, raw_digest=False):
     if object:
         paths.append(object)
     if raw_digest:
-        return md5('/' + '/'.join(paths) + HASH_PATH_SUFFIX).digest()
+        return md5(HASH_PATH_PREFIX + '/' + '/'.join(paths)
+                   + HASH_PATH_SUFFIX).digest()
     else:
-        return md5('/' + '/'.join(paths) + HASH_PATH_SUFFIX).hexdigest()
+        return md5(HASH_PATH_PREFIX + '/' + '/'.join(paths)
+                   + HASH_PATH_SUFFIX).hexdigest()
 
 
 @contextmanager

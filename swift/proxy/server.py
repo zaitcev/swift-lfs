@@ -27,13 +27,14 @@
 import mimetypes
 import os
 from ConfigParser import ConfigParser
-import uuid
+from random import shuffle
+from time import time
 
 from eventlet import Timeout
 
 from swift.common.ring import Ring
 from swift.common.utils import cache_from_env, get_logger, \
-    get_remote_client, split_path, config_true_value
+    get_remote_client, split_path, config_true_value, generate_trans_id
 from swift.common.constraints import check_utf8
 from swift.proxy.controllers import AccountController, ObjectController, \
     ContainerController
@@ -65,6 +66,7 @@ class Application(object):
         self.put_queue_depth = int(conf.get('put_queue_depth', 10))
         self.object_chunk_size = int(conf.get('object_chunk_size', 65536))
         self.client_chunk_size = int(conf.get('client_chunk_size', 65536))
+        self.trans_id_suffix = conf.get('trans_id_suffix', '')
         self.error_suppression_interval = \
             int(conf.get('error_suppression_interval', 60))
         self.error_suppression_limit = \
@@ -112,6 +114,21 @@ class Application(object):
             a.strip()
             for a in conf.get('cors_allow_origin', '').split(',')
             if a.strip()]
+        self.node_timings = {}
+        self.timing_expiry = int(conf.get('timing_expiry', 300))
+        self.sorting_method = conf.get('sorting_method', 'shuffle').lower()
+        self.allow_static_large_object = config_true_value(
+            conf.get('allow_static_large_object', 'true'))
+        value = conf.get('request_node_count', '2 * replicas').lower().split()
+        if len(value) == 1:
+            value = int(value[0])
+            self.request_node_count = lambda r: value
+        elif len(value) == 3 and value[1] == '*' and value[2] == 'replicas':
+            value = int(value[0])
+            self.request_node_count = lambda r: value * r.replica_count
+        else:
+            raise ValueError(
+                'Invalid request_node_count value: %r' % ''.join(value))
         self.lfs_mode = conf.get('lfs_mode', 'swift')
         # Not defaulting to /var/lib/swift for a better bug detection.
         self.lfs_root = conf.get('lfs_root', None)
@@ -224,7 +241,7 @@ class Application(object):
             controller = controller(self, **path_parts)
             if 'swift.trans_id' not in req.environ:
                 # if this wasn't set by an earlier middleware, set it now
-                trans_id = 'tx' + uuid.uuid4().hex
+                trans_id = generate_trans_id(self.trans_id_suffix)
                 req.environ['swift.trans_id'] = trans_id
                 self.logger.txn_id = trans_id
             req.headers['x-trans-id'] = req.environ['swift.trans_id']
@@ -268,6 +285,33 @@ class Application(object):
             fp.write("====== done\n")
             fp.close()
             return HTTPServerError(request=req)
+
+    def sort_nodes(self, nodes):
+        '''
+        Sorts nodes in-place (and returns the sorted list) according to
+        the configured strategy. The default "sorting" is to randomly
+        shuffle the nodes. If the "timing" strategy is chosen, the nodes
+        are sorted according to the stored timing data.
+        '''
+        # In the case of timing sorting, shuffling ensures that close timings
+        # (ie within the rounding resolution) won't prefer one over another.
+        # Python's sort is stable (http://wiki.python.org/moin/HowTo/Sorting/)
+        shuffle(nodes)
+        if self.sorting_method == 'timing':
+            now = time()
+
+            def key_func(node):
+                timing, expires = self.node_timings.get(node['ip'], (-1.0, 0))
+                return timing if expires > now else -1.0
+            nodes.sort(key=key_func)
+        return nodes
+
+    def set_node_timing(self, node, timing):
+        if self.sorting_method != 'timing':
+            return
+        now = time()
+        timing = round(timing, 3)  # sort timings to the millisecond
+        self.node_timings[node['ip']] = (timing, now + self.timing_expiry)
 
 
 def app_factory(global_conf, **local_conf):

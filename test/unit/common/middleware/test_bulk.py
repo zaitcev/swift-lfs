@@ -229,9 +229,10 @@ class TestUntar(unittest.TestCase):
         resp = self.bulk.handle_extract(req, '')
         self.assertEquals(resp.status_int, 404)
 
+    def test_content_length_required(self):
         req = Request.blank('/create_cont_fail/acc/cont')
         resp = self.bulk.handle_extract(req, '')
-        self.assertEquals(resp.status_int, 400)
+        self.assertEquals(resp.status_int, 411)
 
     def build_tar(self, dir_tree=None):
         if not dir_tree:
@@ -253,7 +254,7 @@ class TestUntar(unittest.TestCase):
             {'base_fails1': [{'sub_dir1': ['sub1_file1']},
                              {'sub_dir2': ['sub2_file1', 'sub2_file2']},
                              {'sub_dir3': [{'sub4_dir1': 'sub4_file1'}]}]}]
-        tar = self.build_tar(dir_tree)
+        self.build_tar(dir_tree)
         req = Request.blank('/tar_works/acc/',
                             headers={'Accept': 'application/json'})
         req.environ['wsgi.input'] = open(os.path.join(self.testdir,
@@ -264,7 +265,7 @@ class TestUntar(unittest.TestCase):
         self.assertEquals(resp_data['Number Files Created'], 4)
 
     def test_extract_tar_fail_cont_401(self):
-        tar = self.build_tar()
+        self.build_tar()
         req = Request.blank('/unauth/acc/')
         req.environ['wsgi.input'] = open(os.path.join(self.testdir,
                                                       'tar_fails.tar'))
@@ -273,7 +274,7 @@ class TestUntar(unittest.TestCase):
         self.assertEquals(resp.status_int, 401)
 
     def test_extract_tar_fail_obj_401(self):
-        tar = self.build_tar()
+        self.build_tar()
         req = Request.blank('/create_obj_unauth/acc/cont/')
         req.environ['wsgi.input'] = open(os.path.join(self.testdir,
                                                       'tar_fails.tar'))
@@ -282,7 +283,7 @@ class TestUntar(unittest.TestCase):
         self.assertEquals(resp.status_int, 401)
 
     def test_extract_tar_fail_obj_name_len(self):
-        tar = self.build_tar()
+        self.build_tar()
         req = Request.blank('/tar_works/acc/cont/',
                             headers={'Accept': 'application/json'})
         req.environ['wsgi.input'] = open(os.path.join(self.testdir,
@@ -295,7 +296,7 @@ class TestUntar(unittest.TestCase):
                           '/tar_works/acc/cont/base_fails1/' + ('f' * 101))
 
     def test_extract_tar_fail_compress_type(self):
-        tar = self.build_tar()
+        self.build_tar()
         req = Request.blank('/tar_works/acc/cont/')
         req.environ['wsgi.input'] = open(os.path.join(self.testdir,
                                                       'tar_fails.tar'))
@@ -305,7 +306,7 @@ class TestUntar(unittest.TestCase):
         self.assertEquals(self.app.calls, 0)
 
     def test_extract_tar_fail_max_file_name_length(self):
-        tar = self.build_tar()
+        self.build_tar()
         with patch.object(self.bulk, 'max_failed_extractions', 1):
             self.app.calls = 0
             req = Request.blank('/tar_works/acc/cont/',
@@ -344,7 +345,7 @@ class TestUntar(unittest.TestCase):
                     {'sub_dir2': ['sub2_file1', 'sub2_file2']},
                     'f' * 101,
                     {'sub_dir3': [{'sub4_dir1': 'sub4_file1'}]}]
-        tar = self.build_tar(dir_tree)
+        self.build_tar(dir_tree)
         with patch.object(self.bulk, 'max_containers', 1):
             self.app.calls = 0
             body = open(os.path.join(self.testdir, 'tar_fails.tar')).read()
@@ -360,7 +361,7 @@ class TestUntar(unittest.TestCase):
             {'sub_dir2': ['sub2_file1', 'sub2_file2']},
             'f\xde',
             {'./sub_dir3': [{'sub4_dir1': 'sub4_file1'}]}]}]
-        tar = self.build_tar(dir_tree)
+        self.build_tar(dir_tree)
         req = Request.blank('/create_cont_fail/acc/cont/',
                             headers={'Accept': 'application/json'})
         req.environ['wsgi.input'] = open(os.path.join(self.testdir,
@@ -372,7 +373,7 @@ class TestUntar(unittest.TestCase):
         self.assertEquals(len(resp_data['Errors']), 5)
 
     def test_extract_tar_fail_create_cont_value_err(self):
-        tar = self.build_tar()
+        self.build_tar()
         req = Request.blank('/create_cont_fail/acc/cont/',
                             headers={'Accept': 'application/json'})
         req.environ['wsgi.input'] = open(os.path.join(self.testdir,
@@ -390,8 +391,8 @@ class TestUntar(unittest.TestCase):
 
     def test_get_response_body(self):
         self.assertRaises(
-            HTTPException, self.bulk.get_response_body, 'badformat', {}, [])
-        xml_body = self.bulk.get_response_body(
+            HTTPException, bulk.get_response_body, 'badformat', {}, [])
+        xml_body = bulk.get_response_body(
             'text/xml', {'hey': 'there'}, [['json > xml', '202 Accepted']])
         self.assert_('&gt' in xml_body)
 
@@ -461,18 +462,27 @@ class TestDelete(unittest.TestCase):
             results = self.bulk.get_objs_to_delete(req)
             self.assertEquals(results, ['1', '2', '3'])
 
-    def test_bulk_delete_works_extra_newlines(self):
+        with patch.object(self.bulk, 'max_deletes_per_request', 9):
+            with patch.object(bulk, 'MAX_PATH_LENGTH', 1):
+                req_body = '\n'.join([str(i) for i in xrange(10)])
+                req = Request.blank('/delete_works/AUTH_Acc', body=req_body)
+                self.assertRaises(
+                    HTTPException, self.bulk.get_objs_to_delete, req)
+
+    def test_bulk_delete_works_extra_newlines_extra_quoting(self):
         req = Request.blank('/delete_works/AUTH_Acc',
-                            body='/c/f\n\n\n/c/f404\n\n\n',
+                            body='/c/f\n\n\n/c/f404\n\n\n/c/%2525',
                             headers={'Accept': 'application/json'})
         req.method = 'DELETE'
         resp = self.bulk.handle_delete(req)
         self.assertEquals(
             self.app.delete_paths,
-            ['/delete_works/AUTH_Acc/c/f', '/delete_works/AUTH_Acc/c/f404'])
-        self.assertEquals(self.app.calls, 2)
+            ['/delete_works/AUTH_Acc/c/f',
+             '/delete_works/AUTH_Acc/c/f404',
+             '/delete_works/AUTH_Acc/c/%25'])
+        self.assertEquals(self.app.calls, 3)
         resp_data = json.loads(resp.body)
-        self.assertEquals(resp_data['Number Deleted'], 1)
+        self.assertEquals(resp_data['Number Deleted'], 2)
         self.assertEquals(resp_data['Number Not Found'], 1)
 
     def test_bulk_delete_too_many_newlines(self):

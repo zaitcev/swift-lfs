@@ -22,16 +22,15 @@ import unittest
 import email
 from shutil import rmtree
 from StringIO import StringIO
-from time import gmtime, sleep, strftime, time
+from time import gmtime, strftime, time
 from tempfile import mkdtemp
 from hashlib import md5
 
 from eventlet import sleep, spawn, wsgi, listen, Timeout
 from test.unit import FakeLogger
-from test.unit import _getxattr as getxattr
 from test.unit import _setxattr as setxattr
 from test.unit import connect_tcp, readuntil2crlfs
-from swift.obj import server as object_server, replicator
+from swift.obj import server as object_server
 from swift.common import utils
 from swift.common.utils import hash_path, mkdirs, normalize_timestamp, \
                                NullLogger, storage_directory
@@ -154,7 +153,6 @@ class TestDiskFile(unittest.TestCase):
             hook_call_count[0] += 1
 
         df = self._get_data_file(fsize=65, csize=8, iter_hook=hook)
-        print repr(df.__dict__)
         for _ in df:
             pass
 
@@ -226,7 +224,7 @@ class TestDiskFile(unittest.TestCase):
                 'X-Timestamp': timestamp,
                 'Content-Length': str(os.fstat(fd).st_size),
             }
-            df.put(fd, metadata, extension=extension)
+            df.put(fd, fsize, metadata, extension=extension)
             if invalid_type == 'ETag':
                 etag = md5()
                 etag.update('1' + '0' * (fsize - 1))
@@ -383,6 +381,7 @@ class TestObjectController(unittest.TestCase):
     def setUp(self):
         """ Set up for testing swift.object_server.ObjectController """
         utils.HASH_PATH_SUFFIX = 'endcap'
+        utils.HASH_PATH_PREFIX = 'startcap'
         self.testdir = \
             os.path.join(mkdtemp(), 'tmp_test_object_server_ObjectController')
         mkdirs(os.path.join(self.testdir, 'sda1', 'tmp'))
@@ -677,8 +676,7 @@ class TestObjectController(unittest.TestCase):
             timestamp + '.data')
         self.assert_(os.path.isfile(objfile))
         self.assertEquals(open(objfile).read(), 'VERIFY')
-        self.assertEquals(pickle.loads(getxattr(objfile,
-                            object_server.METADATA_KEY)),
+        self.assertEquals(object_server.read_metadata(objfile),
                           {'X-Timestamp': timestamp,
                            'Content-Length': '6',
                            'ETag': '0b4c12d7e0a73840c1c4f148fda3b037',
@@ -708,8 +706,7 @@ class TestObjectController(unittest.TestCase):
             timestamp + '.data')
         self.assert_(os.path.isfile(objfile))
         self.assertEquals(open(objfile).read(), 'VERIFY TWO')
-        self.assertEquals(pickle.loads(getxattr(objfile,
-                            object_server.METADATA_KEY)),
+        self.assertEquals(object_server.read_metadata(objfile),
                           {'X-Timestamp': timestamp,
                            'Content-Length': '10',
                            'ETag': 'b381a4c5dab1eaa1eb9711fa647cd039',
@@ -751,8 +748,7 @@ class TestObjectController(unittest.TestCase):
             timestamp + '.data')
         self.assert_(os.path.isfile(objfile))
         self.assertEquals(open(objfile).read(), 'VERIFY THREE')
-        self.assertEquals(pickle.loads(getxattr(objfile,
-        object_server.METADATA_KEY)),
+        self.assertEquals(object_server.read_metadata(objfile),
                           {'X-Timestamp': timestamp,
                            'Content-Length': '12',
                            'ETag': 'b114ab7b90d9ccac4bd5d99cc7ebb568',
@@ -1419,8 +1415,66 @@ class TestObjectController(unittest.TestCase):
         self.assertEquals(errbuf.getvalue(), '')
         self.assertEquals(outbuf.getvalue()[:4], '405 ')
 
+        def my_check(*args):
+            return False
+        def my_storage_directory(*args):
+            return self.testdir+'/collide'
+        _storage_directory = object_server.storage_directory
+        _check = object_server.check_object_creation
+        try:
+            object_server.storage_directory = my_storage_directory
+            object_server.check_object_creation = my_check
+            inbuf = StringIO()
+            errbuf = StringIO()
+            outbuf = StringIO()
+            self.object_controller.__call__({'REQUEST_METHOD': 'PUT',
+                                             'SCRIPT_NAME': '',
+                                             'PATH_INFO': '/sda1/p/a/c/o',
+                                             'SERVER_NAME': '127.0.0.1',
+                                             'SERVER_PORT': '8080',
+                                             'SERVER_PROTOCOL': 'HTTP/1.0',
+                                             'CONTENT_LENGTH': '0',
+                                             'CONTENT_TYPE': 'text/html',
+                                             'HTTP_X_TIMESTAMP': 1.2,
+                                             'wsgi.version': (1, 0),
+                                             'wsgi.url_scheme': 'http',
+                                             'wsgi.input': inbuf,
+                                             'wsgi.errors': errbuf,
+                                             'wsgi.multithread': False,
+                                             'wsgi.multiprocess': False,
+                                             'wsgi.run_once': False},
+                                           start_response)
+            self.assertEquals(errbuf.getvalue(), '')
+            self.assertEquals(outbuf.getvalue()[:4], '201 ')
+
+            inbuf = StringIO()
+            errbuf = StringIO()
+            outbuf = StringIO()
+            self.object_controller.__call__({'REQUEST_METHOD': 'PUT',
+                                             'SCRIPT_NAME': '',
+                                             'PATH_INFO': '/sda1/q/b/d/x',
+                                             'SERVER_NAME': '127.0.0.1',
+                                             'SERVER_PORT': '8080',
+                                             'SERVER_PROTOCOL': 'HTTP/1.0',
+                                             'CONTENT_LENGTH': '0',
+                                             'CONTENT_TYPE': 'text/html',
+                                             'HTTP_X_TIMESTAMP': 1.3,
+                                             'wsgi.version': (1, 0),
+                                             'wsgi.url_scheme': 'http',
+                                             'wsgi.input': inbuf,
+                                             'wsgi.errors': errbuf,
+                                             'wsgi.multithread': False,
+                                             'wsgi.multiprocess': False,
+                                             'wsgi.run_once': False},
+                                           start_response)
+            self.assertEquals(errbuf.getvalue(), '')
+            self.assertEquals(outbuf.getvalue()[:4], '403 ')
+
+        finally:
+            object_server.storage_directory = _storage_directory
+            object_server.check_object_creation = _check
+
     def test_invalid_method_doesnt_exist(self):
-        inbuf = StringIO()
         errbuf = StringIO()
         outbuf = StringIO()
         def start_response(*args):
@@ -1432,7 +1486,6 @@ class TestObjectController(unittest.TestCase):
         self.assertEquals(outbuf.getvalue()[:4], '405 ')
 
     def test_invalid_method_is_not_public(self):
-        inbuf = StringIO()
         errbuf = StringIO()
         outbuf = StringIO()
         def start_response(*args):
@@ -1590,8 +1643,8 @@ class TestObjectController(unittest.TestCase):
             storage_directory(object_server.DATADIR, 'p', hash_path('a', 'c',
             'o')), timestamp + '.data')
         self.assert_(os.path.isfile(objfile))
-        self.assertEquals(pickle.loads(getxattr(objfile,
-            object_server.METADATA_KEY)), {'X-Timestamp': timestamp,
+        self.assertEquals(object_server.read_metadata(objfile),
+            {'X-Timestamp': timestamp,
             'Content-Length': '0', 'Content-Type': 'text/plain', 'name':
             '/a/c/o', 'X-Object-Manifest': 'c/o/', 'ETag':
             'd41d8cd98f00b204e9800998ecf8427e'})
@@ -1808,6 +1861,8 @@ class TestObjectController(unittest.TestCase):
                          'x-trans-id': '-'}})
 
     def test_async_update_saves_on_exception(self):
+        _prefix = utils.HASH_PATH_PREFIX
+        utils.HASH_PATH_PREFIX = ''
 
         def fake_http_connect(*args):
             raise Exception('test')
@@ -1820,6 +1875,7 @@ class TestObjectController(unittest.TestCase):
                 {'x-timestamp': '1', 'x-out': 'set'}, 'sda1')
         finally:
             object_server.http_connect = orig_http_connect
+            utils.HASH_PATH_PREFIX = _prefix
         self.assertEquals(
             pickle.load(open(os.path.join(self.testdir, 'sda1',
                 'async_pending', 'a83',
@@ -1828,6 +1884,8 @@ class TestObjectController(unittest.TestCase):
              'container': 'c', 'obj': 'o', 'op': 'PUT'})
 
     def test_async_update_saves_on_non_2xx(self):
+        _prefix = utils.HASH_PATH_PREFIX
+        utils.HASH_PATH_PREFIX = ''
 
         def fake_http_connect(status):
 
@@ -1860,6 +1918,7 @@ class TestObjectController(unittest.TestCase):
                      'op': 'PUT'})
         finally:
             object_server.http_connect = orig_http_connect
+            utils.HASH_PATH_PREFIX = _prefix
 
     def test_async_update_does_not_save_on_2xx(self):
 

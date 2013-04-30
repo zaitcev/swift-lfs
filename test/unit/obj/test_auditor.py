@@ -15,7 +15,6 @@
 
 from test import unit
 import unittest
-import tempfile
 import os
 import time
 from shutil import rmtree
@@ -26,9 +25,8 @@ from swift.obj import auditor
 from swift.obj import server as object_server
 from swift.obj.server import DiskFile, write_metadata, DATADIR
 from swift.common.utils import hash_path, mkdirs, normalize_timestamp, \
-    renamer, storage_directory
+    storage_directory
 from swift.obj.replicator import invalidate_hash
-from swift.common.exceptions import AuditException
 
 
 class TestAuditor(unittest.TestCase):
@@ -74,7 +72,7 @@ class TestAuditor(unittest.TestCase):
                 'X-Timestamp': timestamp,
                 'Content-Length': str(os.fstat(fd).st_size),
             }
-            self.disk_file.put(fd, metadata)
+            self.disk_file.put(fd, 1024, metadata)
             pre_quarantines = self.auditor.quarantines
 
             self.auditor.object_audit(
@@ -102,7 +100,7 @@ class TestAuditor(unittest.TestCase):
                 'X-Timestamp': timestamp,
                 'Content-Length': str(os.fstat(fd).st_size),
             }
-            self.disk_file.put(fd, metadata)
+            self.disk_file.put(fd, 1024, metadata)
             pre_quarantines = self.auditor.quarantines
             # remake so it will have metadata
             self.disk_file = DiskFile(self.devices, 'sda', '0', 'a', 'c', 'o',
@@ -163,7 +161,7 @@ class TestAuditor(unittest.TestCase):
                 'X-Timestamp': timestamp,
                 'Content-Length': str(os.fstat(fd).st_size),
             }
-            self.disk_file.put(fd, metadata)
+            self.disk_file.put(fd, 1024, metadata)
             self.disk_file.close()
         self.auditor.audit_all_objects()
         self.assertEquals(self.auditor.quarantines, pre_quarantines)
@@ -183,7 +181,7 @@ class TestAuditor(unittest.TestCase):
                 'X-Timestamp': timestamp,
                 'Content-Length': str(os.fstat(fd).st_size),
             }
-            self.disk_file.put(fd, metadata)
+            self.disk_file.put(fd, 1024, metadata)
             self.disk_file.close()
             os.write(fd, 'extra_data')
         self.auditor.audit_all_objects()
@@ -204,7 +202,7 @@ class TestAuditor(unittest.TestCase):
                 'X-Timestamp': timestamp,
                 'Content-Length': str(os.fstat(fd).st_size),
             }
-            self.disk_file.put(fd, metadata)
+            self.disk_file.put(fd, 10, metadata)
             self.disk_file.close()
         self.auditor.audit_all_objects()
         self.disk_file = DiskFile(self.devices, 'sdb', '0', 'a', 'c',
@@ -220,7 +218,7 @@ class TestAuditor(unittest.TestCase):
                 'X-Timestamp': timestamp,
                 'Content-Length': str(os.fstat(fd).st_size),
             }
-            self.disk_file.put(fd, metadata)
+            self.disk_file.put(fd, 10, metadata)
             self.disk_file.close()
             os.write(fd, 'extra_data')
         self.auditor.audit_all_objects()
@@ -240,7 +238,7 @@ class TestAuditor(unittest.TestCase):
                 'X-Timestamp': str(normalize_timestamp(time.time())),
                 'Content-Length': str(os.fstat(fd).st_size),
             }
-            self.disk_file.put(fd, metadata)
+            self.disk_file.put(fd, 1024, metadata)
             etag = md5()
             etag.update('1' + '0' * 1023)
             etag = etag.hexdigest()
@@ -277,7 +275,7 @@ class TestAuditor(unittest.TestCase):
                 'X-Timestamp': str(normalize_timestamp(time.time())),
                 'Content-Length': 10,
             }
-            self.disk_file.put(fd, metadata)
+            self.disk_file.put(fd, 10, metadata)
             etag = md5()
             etag = etag.hexdigest()
             metadata['ETag'] = etag
@@ -303,8 +301,6 @@ class TestAuditor(unittest.TestCase):
     def test_with_tombstone(self):
         ts_file_path = self.setup_bad_zero_byte(with_ts=True)
         self.auditor.run_once()
-        quarantine_path = os.path.join(self.devices,
-                                       'sda', 'quarantined', 'objects')
         self.assertTrue(ts_file_path.endswith('ts'))
         self.assertTrue(os.path.exists(ts_file_path))
 

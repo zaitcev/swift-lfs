@@ -15,7 +15,7 @@
 
 import unittest
 
-from swift.common.swob import Request, Response
+from swift.common.swob import Request
 from swift.common.middleware import catch_errors
 from swift.common.utils import get_logger
 
@@ -81,6 +81,17 @@ class TestCatchErrors(unittest.TestCase):
         req = Request.blank('/', environ={'REQUEST_METHOD': 'GET'})
         resp = app(req.environ, start_response)
         self.assertEquals(list(resp), ['An error occurred'])
+
+    def test_trans_id_header_suffix(self):
+        self.assertEquals(self.logger.txn_id, None)
+
+        def start_response(status, headers, exc_info=None):
+            self.assert_('x-trans-id' in (x[0] for x in headers))
+        app = catch_errors.CatchErrorMiddleware(
+            FakeApp(), {'trans_id_suffix': '-stuff'})
+        req = Request.blank('/v1/a/c/o')
+        app(req.environ, start_response)
+        self.assertTrue(self.logger.txn_id.endswith('-stuff'))
 
 if __name__ == '__main__':
     unittest.main()

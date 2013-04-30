@@ -19,7 +19,6 @@ from __future__ import with_statement
 from contextlib import contextmanager
 import hashlib
 import logging
-import operator
 import os
 from uuid import uuid4
 import sys
@@ -112,11 +111,8 @@ def chexor(old, name, timestamp):
     """
     if name is None:
         raise Exception('name is None!')
-    old = old.decode('hex')
-    new = hashlib.md5(('%s-%s' % (name, timestamp)).encode('utf_8')).digest()
-    response = ''.join(
-        map(chr, map(operator.xor, map(ord, old), map(ord, new))))
-    return response.encode('hex')
+    new = hashlib.md5(('%s-%s' % (name, timestamp)).encode('utf8')).hexdigest()
+    return '%032x' % (int(old, 16) ^ int(new, 16))
 
 
 def get_db_connection(path, timeout=30, okay_to_create=False):
@@ -1406,28 +1402,6 @@ class AccountBroker(DatabaseBroker):
                     raise
             DatabaseBroker._reclaim(self, conn, container_timestamp)
             conn.commit()
-
-    def get_container_timestamp(self, container_name):
-        """
-        Get the put_timestamp of a container.
-
-        :param container_name: container name
-
-        :returns: put_timestamp of the container
-        """
-        try:
-            self._commit_puts()
-        except LockTimeout:
-            if not self.stale_reads_ok:
-                raise
-        with self.get() as conn:
-            ret = conn.execute('''
-                SELECT put_timestamp FROM container
-                WHERE name = ? AND deleted != 1''',
-                              (container_name,)).fetchone()
-            if ret:
-                ret = ret[0]
-            return ret
 
     def put_container(self, name, put_timestamp, delete_timestamp,
                       object_count, bytes_used):

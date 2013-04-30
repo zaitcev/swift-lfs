@@ -20,7 +20,6 @@ from test.unit import temptree
 import ctypes
 import errno
 import logging
-import mimetools
 import os
 import random
 import re
@@ -35,9 +34,8 @@ from shutil import rmtree
 from StringIO import StringIO
 from functools import partial
 from tempfile import TemporaryFile, NamedTemporaryFile
-from logging import handlers as logging_handlers
 
-from eventlet import sleep
+from mock import patch
 
 from swift.common.exceptions import (Timeout, MessageTimeout,
                                      ConnectionTimeout)
@@ -126,6 +124,7 @@ class TestUtils(unittest.TestCase):
 
     def setUp(self):
         utils.HASH_PATH_SUFFIX = 'endcap'
+        utils.HASH_PATH_PREFIX = 'startcap'
 
     def test_normalize_timestamp(self):
         """ Test swift.common.utils.normalize_timestamp """
@@ -420,7 +419,7 @@ class TestUtils(unittest.TestCase):
 
         try:
             utils.SysLogHandler = syslog_handler_catcher
-            logger = utils.get_logger({
+            utils.get_logger({
                 'log_facility': 'LOG_LOCAL3',
             }, 'server', log_route='server')
             self.assertEquals([
@@ -429,7 +428,7 @@ class TestUtils(unittest.TestCase):
                 syslog_handler_args)
 
             syslog_handler_args = []
-            logger = utils.get_logger({
+            utils.get_logger({
                 'log_facility': 'LOG_LOCAL3',
                 'log_address': '/foo/bar',
             }, 'server', log_route='server')
@@ -443,7 +442,7 @@ class TestUtils(unittest.TestCase):
 
             # Using UDP with default port
             syslog_handler_args = []
-            logger = utils.get_logger({
+            utils.get_logger({
                 'log_udp_host': 'syslog.funtimes.com',
             }, 'server', log_route='server')
             self.assertEquals([
@@ -454,7 +453,7 @@ class TestUtils(unittest.TestCase):
 
             # Using UDP with non-default port
             syslog_handler_args = []
-            logger = utils.get_logger({
+            utils.get_logger({
                 'log_udp_host': 'syslog.funtimes.com',
                 'log_udp_port': '2123',
             }, 'server', log_route='server')
@@ -585,6 +584,10 @@ class TestUtils(unittest.TestCase):
             self.assertEquals(logger.txn_id, '12345')
             logger.warn('test 12345 test')
             self.assertEquals(strip_value(sio), 'test 12345 test\n')
+            # Test multi line collapsing
+            logger.error('my\nerror\nmessage')
+            log_msg = strip_value(sio)
+            self.assert_('my#012error#012message' in log_msg)
 
             # test client_ip
             self.assertFalse(logger.client_ip)
@@ -621,20 +624,28 @@ class TestUtils(unittest.TestCase):
         self.assert_('127.0.0.1' in myips)
 
     def test_hash_path(self):
+        _prefix = utils.HASH_PATH_PREFIX
+        utils.HASH_PATH_PREFIX = ''
         # Yes, these tests are deliberately very fragile. We want to make sure
         # that if someones changes the results hash_path produces, they know it
-        self.assertEquals(utils.hash_path('a'),
-                          '1c84525acb02107ea475dcd3d09c2c58')
-        self.assertEquals(utils.hash_path('a', 'c'),
-                          '33379ecb053aa5c9e356c68997cbb59e')
-        self.assertEquals(utils.hash_path('a', 'c', 'o'),
-                          '06fbf0b514e5199dfc4e00f42eb5ea83')
-        self.assertEquals(utils.hash_path('a', 'c', 'o', raw_digest=False),
-                          '06fbf0b514e5199dfc4e00f42eb5ea83')
-        self.assertEquals(utils.hash_path('a', 'c', 'o', raw_digest=True),
-                          '\x06\xfb\xf0\xb5\x14\xe5\x19\x9d\xfcN'
-                          '\x00\xf4.\xb5\xea\x83')
-        self.assertRaises(ValueError, utils.hash_path, 'a', object='o')
+        try:
+            self.assertEquals(utils.hash_path('a'),
+                              '1c84525acb02107ea475dcd3d09c2c58')
+            self.assertEquals(utils.hash_path('a', 'c'),
+                              '33379ecb053aa5c9e356c68997cbb59e')
+            self.assertEquals(utils.hash_path('a', 'c', 'o'),
+                              '06fbf0b514e5199dfc4e00f42eb5ea83')
+            self.assertEquals(utils.hash_path('a', 'c', 'o', raw_digest=False),
+                              '06fbf0b514e5199dfc4e00f42eb5ea83')
+            self.assertEquals(utils.hash_path('a', 'c', 'o', raw_digest=True),
+                              '\x06\xfb\xf0\xb5\x14\xe5\x19\x9d\xfcN'
+                              '\x00\xf4.\xb5\xea\x83')
+            self.assertRaises(ValueError, utils.hash_path, 'a', object='o')
+            utils.HASH_PATH_PREFIX = 'abcdef'
+            self.assertEquals(utils.hash_path('a', 'c', 'o', raw_digest=False),
+                              '363f9b535bfb7d17a43a46a358afca0e')
+        finally:
+            utils.HASH_PATH_PREFIX = _prefix
 
     def test_load_libc_function(self):
         self.assert_(callable(
@@ -1161,6 +1172,43 @@ log_name = %(yarr)s'''
         finally:
             utils._sys_fallocate = orig__sys_fallocate
 
+    def test_generate_trans_id(self):
+        fake_time = 1366428370.5163341
+        with patch.object(utils.time, 'time', return_value=fake_time):
+            trans_id = utils.generate_trans_id('')
+            self.assertEquals(len(trans_id), 34)
+            self.assertEquals(trans_id[:2], 'tx')
+            self.assertEquals(trans_id[23], '-')
+            self.assertEquals(int(trans_id[24:], 16), int(fake_time))
+        with patch.object(utils.time, 'time', return_value=fake_time):
+            trans_id = utils.generate_trans_id('-suffix')
+            self.assertEquals(len(trans_id), 41)
+            self.assertEquals(trans_id[:2], 'tx')
+            self.assertEquals(trans_id[34:], '-suffix')
+            self.assertEquals(trans_id[23], '-')
+            self.assertEquals(int(trans_id[24:34], 16), int(fake_time))
+
+    def test_get_trans_id_time(self):
+        ts = utils.get_trans_id_time('tx8c8bc884cdaf499bb29429aa9c46946e')
+        self.assertEquals(ts, None)
+        ts = utils.get_trans_id_time('tx1df4ff4f55ea45f7b2ec2-0051720c06')
+        self.assertEquals(ts, 1366428678)
+        self.assertEquals(
+            time.asctime(time.gmtime(ts)) + ' UTC',
+            'Sat Apr 20 03:31:18 2013 UTC')
+        ts = utils.get_trans_id_time(
+            'tx1df4ff4f55ea45f7b2ec2-0051720c06-suffix')
+        self.assertEquals(ts, 1366428678)
+        self.assertEquals(
+            time.asctime(time.gmtime(ts)) + ' UTC',
+            'Sat Apr 20 03:31:18 2013 UTC')
+        ts = utils.get_trans_id_time('')
+        self.assertEquals(ts, None)
+        ts = utils.get_trans_id_time('garbage')
+        self.assertEquals(ts, None)
+        ts = utils.get_trans_id_time('tx1df4ff4f55ea45f7b2ec2-almostright')
+        self.assertEquals(ts, None)
+
 
 class TestStatsdLogging(unittest.TestCase):
     def test_get_logger_statsd_client_not_specified(self):
@@ -1540,6 +1588,56 @@ class TestStatsdLoggingDelegation(unittest.TestCase):
             self.assertEquals(logger.thread_locals, ('5678', '5.6.7.8'))
         finally:
             logger.thread_locals = orig_thread_locals
+
+    def test_no_fdatasync(self):
+        called = []
+        class NoFdatasync:
+            pass
+        def fsync(fd):
+            called.append(fd)
+        with patch('swift.common.utils.os', NoFdatasync()):
+            with patch('swift.common.utils.fsync', fsync):
+                utils.fdatasync(12345)
+                self.assertEquals(called, [12345])
+
+    def test_yes_fdatasync(self):
+        called = []
+        class YesFdatasync:
+            def fdatasync(self, fd):
+                called.append(fd)
+        with patch('swift.common.utils.os', YesFdatasync()):
+            utils.fdatasync(12345)
+            self.assertEquals(called, [12345])
+
+    def test_fsync_bad_fullsync(self):
+        class FCNTL:
+            F_FULLSYNC = 123
+            def fcntl(self, fd, op):
+                raise IOError(18)
+        with patch('swift.common.utils.fcntl', FCNTL()):
+            self.assertRaises(OSError, lambda: utils.fsync(12345))
+
+    def test_fsync_f_fullsync(self):
+        called = []
+        class FCNTL:
+            F_FULLSYNC = 123
+            def fcntl(self, fd, op):
+                called[:] = [fd, op]
+                return 0
+        with patch('swift.common.utils.fcntl', FCNTL()):
+            utils.fsync(12345)
+            self.assertEquals(called, [12345, 123])
+
+    def test_fsync_no_fullsync(self):
+        called = []
+        class FCNTL:
+            pass
+        def fsync(fd):
+            called.append(fd)
+        with patch('swift.common.utils.fcntl', FCNTL()):
+            with patch('os.fsync', fsync):
+                utils.fsync(12345)
+                self.assertEquals(called, [12345])
 
 
 if __name__ == '__main__':

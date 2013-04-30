@@ -31,14 +31,14 @@ from xattr import getxattr, setxattr
 from eventlet import sleep, Timeout, tpool
 
 from swift.common.utils import mkdirs, normalize_timestamp, public, \
-    storage_directory, hash_path, renamer, fallocate, fsync, \
+    storage_directory, hash_path, renamer, fallocate, fsync, fdatasync, \
     split_path, drop_buffer_cache, get_logger, write_pickle, \
     config_true_value, validate_device_partition, timing_stats
 from swift.common.bufferedhttp import http_connect
 from swift.common.constraints import check_object_creation, check_mount, \
     check_float, check_utf8
 from swift.common.exceptions import ConnectionTimeout, DiskFileError, \
-    DiskFileNotExist
+    DiskFileNotExist, DiskFileCollision, DiskFileNoSpace
 from swift.obj.replicator import tpool_reraise, invalidate_hash, \
     quarantine_renamer, get_hashes
 from swift.common.http import is_success
@@ -46,7 +46,7 @@ from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPCreated, \
     HTTPInternalServerError, HTTPNoContent, HTTPNotFound, HTTPNotModified, \
     HTTPPreconditionFailed, HTTPRequestTimeout, HTTPUnprocessableEntity, \
     HTTPClientDisconnect, HTTPMethodNotAllowed, Request, Response, UTC, \
-    HTTPInsufficientStorage, multi_range_iterator
+    HTTPInsufficientStorage, HTTPForbidden, multi_range_iterator
 
 
 DATADIR = 'objects'
@@ -105,6 +105,7 @@ class DiskFile(object):
     :param keep_data_fp: if True, don't close the fp, otherwise close it
     :param disk_chunk_size: size of chunks on file reads
     :param iter_hook: called when __iter__ returns a chunk
+    :raises DiskFileCollision: on md5 collision
     """
 
     def __init__(self, path, device, partition, account, container, obj,
@@ -155,6 +156,14 @@ class DiskFile(object):
                     if key.lower() not in DISALLOWED_HEADERS:
                         del self.metadata[key]
                 self.metadata.update(read_metadata(mfp))
+        if 'name' in self.metadata:
+            if self.metadata['name'] != self.name:
+                self.logger.error(_('Client path %(client)s does not match '
+                                    'path stored in object metadata %(meta)s'),
+                                  {'client': self.name,
+                                   'meta': self.metadata['name']})
+                raise DiskFileCollision('Client path does not match path '
+                                        'stored in object metadata')
 
     def __iter__(self):
         """Returns an iterator over the data file."""
@@ -207,7 +216,7 @@ class DiskFile(object):
 
     def app_iter_ranges(self, ranges, content_type, boundary, size):
         """Returns an iterator over the data file for a set of ranges"""
-        if (not ranges or len(ranges) == 0):
+        if not ranges:
             yield ''
         else:
             try:
@@ -275,12 +284,22 @@ class DiskFile(object):
                 int(self.metadata['X-Delete-At']) <= time.time())
 
     @contextmanager
-    def mkstemp(self):
-        """Contextmanager to make a temporary file."""
+    def mkstemp(self, size=None):
+        """
+        Contextmanager to make a temporary file.
+
+        :param size: optional initial size of file to allocate on disk
+        :raises DiskFileNoSpace: if a size is specified and fallocate fails
+        """
         if not os.path.exists(self.tmpdir):
             mkdirs(self.tmpdir)
         fd, self.tmppath = mkstemp(dir=self.tmpdir)
         try:
+            if size is not None and size > 0:
+                try:
+                    fallocate(fd, size)
+                except OSError:
+                    raise DiskFileNoSpace()
             yield fd
         finally:
             try:
@@ -293,24 +312,34 @@ class DiskFile(object):
             except OSError:
                 pass
 
-    def put(self, fd, metadata, extension='.data'):
+    def put(self, fd, fsize, metadata, extension='.data'):
         """
         Finalize writing the file on disk, and renames it from the temp file to
         the real location.  This should be called after the data has been
         written to the temp file.
 
         :param fd: file descriptor of the temp file
+        :param fsize: final on-disk size of the created file
         :param metadata: dictionary of metadata to be written
         :param extension: extension to be used when making the file
         """
         assert self.tmppath is not None
         metadata['name'] = self.name
         timestamp = normalize_timestamp(metadata['X-Timestamp'])
+        # Write the metadata before calling fsync() so that both data and
+        # metadata are flushed to disk.
         write_metadata(fd, metadata)
-        if 'Content-Length' in metadata:
-            self.drop_cache(fd, 0, int(metadata['Content-Length']))
+        # We call fsync() before calling drop_cache() to lower the amount of
+        # redundant work the drop cache code will perform on the pages (now
+        # that after fsync the pages will be all clean).
         tpool.execute(fsync, fd)
+        # From the Department of the Redundancy Department, make sure we
+        # call drop_cache() after fsync() to avoid redundant work (pages
+        # all clean).
+        self.drop_cache(fd, 0, fsize)
         invalidate_hash(os.path.dirname(self.datadir))
+        # After the rename completes, this object will be available for other
+        # requests to reference.
         renamer(self.tmppath,
                 os.path.join(self.datadir, timestamp + extension))
         self.metadata = metadata
@@ -324,7 +353,7 @@ class DiskFile(object):
         """
         extension = '.ts' if tombstone else '.meta'
         with self.mkstemp() as fd:
-            self.put(fd, metadata, extension=extension)
+            self.put(fd, 0, metadata, extension=extension)
 
     def unlinkold(self, timestamp):
         """
@@ -417,6 +446,7 @@ class ObjectController(object):
             content-encoding,
             x-delete-at,
             x-object-manifest,
+            x-static-large-object,
         '''
         self.allowed_headers = set(
             i.strip().lower() for i in
@@ -640,61 +670,70 @@ class ObjectController(object):
         orig_timestamp = file.metadata.get('X-Timestamp')
         upload_expiration = time.time() + self.max_upload_time
         etag = md5()
+        fsize = request.headers.get('content-length', None)
+        if fsize is not None:
+            fsize = int(fsize)
         upload_size = 0
         last_sync = 0
-        with file.mkstemp() as fd:
-            try:
-                fallocate(fd, int(request.headers.get('content-length', 0)))
-            except OSError:
-                return HTTPInsufficientStorage(drive=device, request=request)
-            reader = request.environ['wsgi.input'].read
-            for chunk in iter(lambda: reader(self.network_chunk_size), ''):
-                upload_size += len(chunk)
-                if time.time() > upload_expiration:
-                    self.logger.increment('PUT.timeouts')
-                    return HTTPRequestTimeout(request=request)
-                etag.update(chunk)
-                while chunk:
-                    written = os.write(fd, chunk)
-                    chunk = chunk[written:]
-                # For large files sync every 512MB (by default) written
-                if upload_size - last_sync >= self.bytes_per_sync:
-                    tpool.execute(fsync, fd)
-                    drop_buffer_cache(fd, last_sync, upload_size - last_sync)
-                    last_sync = upload_size
-                sleep()
+        elapsed_time = 0
+        try:
+            with file.mkstemp(size=fsize) as fd:
+                reader = request.environ['wsgi.input'].read
+                for chunk in iter(lambda: reader(self.network_chunk_size), ''):
+                    start_time = time.time()
+                    upload_size += len(chunk)
+                    if time.time() > upload_expiration:
+                        self.logger.increment('PUT.timeouts')
+                        return HTTPRequestTimeout(request=request)
+                    etag.update(chunk)
+                    while chunk:
+                        written = os.write(fd, chunk)
+                        chunk = chunk[written:]
+                    # For large files sync every 512MB (by default) written
+                    if upload_size - last_sync >= self.bytes_per_sync:
+                        tpool.execute(fdatasync, fd)
+                        drop_buffer_cache(fd, last_sync,
+                                          upload_size - last_sync)
+                        last_sync = upload_size
+                    sleep()
+                    elapsed_time += time.time() - start_time
 
-            if 'content-length' in request.headers and \
-                    int(request.headers['content-length']) != upload_size:
-                return HTTPClientDisconnect(request=request)
-            etag = etag.hexdigest()
-            if 'etag' in request.headers and \
-                    request.headers['etag'].lower() != etag:
-                return HTTPUnprocessableEntity(request=request)
-            metadata = {
-                'X-Timestamp': request.headers['x-timestamp'],
-                'Content-Type': request.headers['content-type'],
-                'ETag': etag,
-                'Content-Length': str(upload_size),
-            }
-            metadata.update(val for val in request.headers.iteritems()
-                            if val[0].lower().startswith('x-object-meta-') and
-                            len(val[0]) > 14)
-            for header_key in self.allowed_headers:
-                if header_key in request.headers:
-                    header_caps = header_key.title()
-                    metadata[header_caps] = request.headers[header_key]
-            old_delete_at = int(file.metadata.get('X-Delete-At') or 0)
-            if old_delete_at != new_delete_at:
-                if new_delete_at:
-                    self.delete_at_update(
-                        'PUT', new_delete_at, account, container, obj,
-                        request.headers, device)
-                if old_delete_at:
-                    self.delete_at_update(
-                        'DELETE', old_delete_at, account, container, obj,
-                        request.headers, device)
-            file.put(fd, metadata)
+                if upload_size:
+                    self.logger.transfer_rate(
+                        'PUT.' + device + '.timing', elapsed_time, upload_size)
+
+                if fsize is not None and fsize != upload_size:
+                    return HTTPClientDisconnect(request=request)
+                etag = etag.hexdigest()
+                if 'etag' in request.headers and \
+                        request.headers['etag'].lower() != etag:
+                    return HTTPUnprocessableEntity(request=request)
+                metadata = {
+                    'X-Timestamp': request.headers['x-timestamp'],
+                    'Content-Type': request.headers['content-type'],
+                    'ETag': etag,
+                    'Content-Length': str(upload_size),
+                }
+                metadata.update(val for val in request.headers.iteritems()
+                                if val[0].lower().startswith('x-object-meta-')
+                                and len(val[0]) > 14)
+                for header_key in self.allowed_headers:
+                    if header_key in request.headers:
+                        header_caps = header_key.title()
+                        metadata[header_caps] = request.headers[header_key]
+                old_delete_at = int(file.metadata.get('X-Delete-At') or 0)
+                if old_delete_at != new_delete_at:
+                    if new_delete_at:
+                        self.delete_at_update(
+                            'PUT', new_delete_at, account, container, obj,
+                            request.headers, device)
+                    if old_delete_at:
+                        self.delete_at_update(
+                            'DELETE', old_delete_at, account, container, obj,
+                            request.headers, device)
+                file.put(fd, upload_size, metadata)
+        except DiskFileNoSpace:
+            return HTTPInsufficientStorage(drive=device, request=request)
         file.unlinkold(metadata['X-Timestamp'])
         if not orig_timestamp or \
                 orig_timestamp < request.headers['x-timestamp']:
@@ -918,6 +957,8 @@ class ObjectController(object):
                     res = HTTPMethodNotAllowed()
                 else:
                     res = method(req)
+            except DiskFileCollision:
+                res = HTTPForbidden(request=req)
             except (Exception, Timeout):
                 self.logger.exception(_(
                     'ERROR __call__ error with %(method)s'

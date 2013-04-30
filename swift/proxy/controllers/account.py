@@ -26,7 +26,6 @@
 
 import time
 from urllib import unquote
-from random import shuffle
 
 from swift.common.utils import normalize_timestamp, public
 from swift.common.constraints import check_metadata, MAX_ACCOUNT_NAME_LENGTH
@@ -49,10 +48,9 @@ class AccountController(Controller):
     def GETorHEAD(self, req):
         """Handler for HTTP GET/HEAD requests."""
         partition, nodes = self.app.account_ring.get_nodes(self.account_name)
-        shuffle(nodes)
         resp = self.GETorHEAD_base(
-            req, _('Account'), partition, nodes, req.path_info.rstrip('/'),
-            len(nodes))
+            req, _('Account'), self.app.account_ring, partition,
+            req.path_info.rstrip('/'))
         if resp.status_int == HTTP_NOT_FOUND and self.app.account_autocreate:
             if len(self.account_name) > MAX_ACCOUNT_NAME_LENGTH:
                 resp = HTTPBadRequest(request=req)
@@ -71,8 +69,8 @@ class AccountController(Controller):
                                         self.account_name)
                 return resp
             resp = self.GETorHEAD_base(
-                req, _('Account'), partition, nodes, req.path_info.rstrip('/'),
-                len(nodes))
+                req, _('Account'), self.app.account_ring, partition,
+                req.path_info.rstrip('/'))
         return resp
 
     @public
@@ -141,6 +139,11 @@ class AccountController(Controller):
     @public
     def DELETE(self, req):
         """HTTP DELETE request handler."""
+        # Extra safety in case someone typos a query string for an
+        # account-level DELETE request that was really meant to be caught by
+        # some middleware.
+        if req.query_string:
+            return HTTPBadRequest(request=req)
         if not self.app.allow_account_management:
             return HTTPMethodNotAllowed(
                 request=req,
