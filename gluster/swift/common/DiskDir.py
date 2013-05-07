@@ -22,7 +22,7 @@ from gluster.swift.common.utils import clean_metadata, dir_empty, rmdirs, \
      DEFAULT_UID, validate_object, create_object_metadata, read_metadata, \
      write_metadata, X_CONTENT_TYPE, X_CONTENT_LENGTH, X_TIMESTAMP, \
      X_PUT_TIMESTAMP, X_TYPE, X_ETAG, X_OBJECTS_COUNT, X_BYTES_USED, \
-     X_CONTAINER_COUNT, CONTAINER
+     X_CONTAINER_COUNT, CONTAINER, os_path
 from gluster.swift.common import Glusterfs
 
 from swift.common.constraints import CONTAINER_LISTING_LIMIT
@@ -54,7 +54,7 @@ def _read_metadata(dd):
 
 class DiskCommon(object):
     def is_deleted(self):
-        return not os.path.exists(self.datadir)
+        return not os_path.exists(self.datadir)
 
     def filter_prefix(self, objects, prefix):
         """
@@ -156,7 +156,7 @@ class DiskDir(DiskCommon):
         self.gid = int(gid)
         # XXX Used to be a global _db_file, wrong. Tell Peter, do per-entity.
         self.db_file = self.datadir
-        self.dir_exists = os.path.exists(self.datadir)
+        self.dir_exists = os_path.exists(self.datadir)
         if self.dir_exists:
             try:
                 self.metadata = _read_metadata(self.datadir)
@@ -190,7 +190,7 @@ class DiskDir(DiskCommon):
     def delete(self):
         if self.empty():
             #For delete account.
-            if os.path.ismount(self.datadir):
+            if os_path.ismount(self.datadir):
                 clean_metadata(self.datadir)
             else:
                 rmdirs(self.datadir)
@@ -372,14 +372,14 @@ class DiskDir(DiskCommon):
     def initialize(self, timestamp):
         if not self.dir_exists:
             mkdirs(self.datadir)
-            self.dir_exists = os.path.exists(self.datadir)
+            self.dir_exists = os_path.exists(self.datadir)
         self._initialize()
 
     def update_put_timestamp(self, timestamp):
         """
         Create the container if it doesn't exist and update the timestamp
         """
-        if not os.path.exists(self.datadir):
+        if not os_path.exists(self.datadir):
             self.put(self.metadata)
 
     def delete_object(self, name, timestamp):

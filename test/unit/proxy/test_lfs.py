@@ -39,27 +39,29 @@ from collections import defaultdict
 #
 _xattrs = {}
 _xattr_op_cnt = defaultdict(int)
-_xattr_err = {}
+_xattr_set_err = {}
+_xattr_get_err = {}
+_xattr_rem_err = {}
 
 def _xkey(path, key):
     return "%s:%s" % (path, key)
 
-def _setxattr(path, key, value):
+def _setxattr(path, key, value, *args, **kwargs):
     _xattr_op_cnt['set'] += 1
     xkey = _xkey(path, key)
-    if xkey in _xattr_err:
+    if xkey in _xattr_set_err:
         e = IOError()
-        e.errno = _xattr_err[xkey]
+        e.errno = _xattr_set_err[xkey]
         raise e
     global _xattrs
     _xattrs[xkey] = value
 
-def _getxattr(path, key):
+def _getxattr(path, key, *args, **kwargs):
     _xattr_op_cnt['get'] += 1
     xkey = _xkey(path, key)
-    if xkey in _xattr_err:
+    if xkey in _xattr_get_err:
         e = IOError()
-        e.errno = _xattr_err[xkey]
+        e.errno = _xattr_get_err[xkey]
         raise e
     global _xattrs
     if xkey in _xattrs:
@@ -70,12 +72,12 @@ def _getxattr(path, key):
         raise e
     return ret_val
 
-def _removexattr(path, key):
+def _removexattr(path, key, *args, **kwargs):
     _xattr_op_cnt['remove'] += 1
     xkey = _xkey(path, key)
-    if xkey in _xattr_err:
+    if xkey in _xattr_rem_err:
         e = IOError()
-        e.errno = _xattr_err[xkey]
+        e.errno = _xattr_rem_err[xkey]
         raise e
     global _xattrs
     if xkey in _xattrs:
@@ -90,24 +92,26 @@ def _initxattr():
     _xattrs = {}
     global _xattr_op_cnt
     _xattr_op_cnt = defaultdict(int)
-    global _xattr_err
-    _xattr_err = {}
+    global _xattr_set_err, _xattr_get_err, _xattr_rem_err
+    _xattr_set_err = {}
+    _xattr_get_err = {}
+    _xattr_rem_err = {}
 
     # Save the current methods
-    global _xattr_set;    _xattr_set    = xattr.set
-    global _xattr_get;    _xattr_get    = xattr.get
-    global _xattr_remove; _xattr_remove = xattr.remove
+    global _xattr_set;    _xattr_set    = xattr.setxattr
+    global _xattr_get;    _xattr_get    = xattr.getxattr
+    global _xattr_remove; _xattr_remove = xattr.removexattr
 
     # Monkey patch the calls we use with our internal unit test versions
-    xattr.set    = _setxattr
-    xattr.get    = _getxattr
-    xattr.remove = _removexattr
+    xattr.setxattr    = _setxattr
+    xattr.getxattr    = _getxattr
+    xattr.removexattr = _removexattr
 
 def _destroyxattr():
     # Restore the current methods just in case
-    global _xattr_set;    xattr.set    = _xattr_set
-    global _xattr_get;    xattr.get    = _xattr_get
-    global _xattr_remove; xattr.remove = _xattr_remove
+    global _xattr_set;    xattr.setxattr    = _xattr_set
+    global _xattr_get;    xattr.getxattr    = _xattr_get
+    global _xattr_remove; xattr.removexattr = _xattr_remove
     # Destroy the stored values and
     global _xattrs; _xattrs = None
 

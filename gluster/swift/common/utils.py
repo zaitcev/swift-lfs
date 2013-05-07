@@ -19,6 +19,7 @@ import errno
 import xattr
 import random
 from hashlib import md5
+from eventlet import sleep
 import cPickle as pickle
 from ConfigParser import ConfigParser, NoSectionError, NoOptionError
 from swift.common.utils import normalize_timestamp, TRUE_VALUES
@@ -56,7 +57,6 @@ MEMCACHE_KEY_PREFIX = 'gluster.swift.'
 MEMCACHE_ACCOUNT_DETAILS_KEY_PREFIX = MEMCACHE_KEY_PREFIX + 'account.details.'
 MEMCACHE_CONTAINER_DETAILS_KEY_PREFIX = MEMCACHE_KEY_PREFIX + 'container.details.'
 
-
 def read_metadata(path):
     """
     Helper function to read the pickled metadata from a File/Directory.
@@ -70,7 +70,7 @@ def read_metadata(path):
     key = 0
     while metadata is None:
         try:
-            metadata_s += xattr.get(path, '%s%s' % (METADATA_KEY, (key or '')))
+            metadata_s += xattr.getxattr(path, '%s%s' % (METADATA_KEY, (key or '')))
         except IOError as err:
             if err.errno == errno.ENODATA:
                 if key > 0:
@@ -86,7 +86,7 @@ def read_metadata(path):
                 # to the caller we have no metadata.
                 metadata = {}
             else:
-                logging.exception("xattr.get failed on %s key %s err: %s",
+                logging.exception("xattr.getxattr failed on %s key %s err: %s",
                                   path, key, str(err))
                 # Note that we don't touch the keys on errors fetching the
                 # data since it could be a transient state.
@@ -120,9 +120,9 @@ def write_metadata(path, metadata):
     key = 0
     while metastr:
         try:
-            xattr.set(path, '%s%s' % (METADATA_KEY, key or ''), metastr[:MAX_XATTR_SIZE])
+            xattr.setxattr(path, '%s%s' % (METADATA_KEY, key or ''), metastr[:MAX_XATTR_SIZE])
         except IOError as err:
-            logging.exception("xattr.set failed on %s key %s err: %s", path, key, str(err))
+            logging.exception("setxattr failed on %s key %s err: %s", path, key, str(err))
             raise
         metastr = metastr[MAX_XATTR_SIZE:]
         key += 1
@@ -131,7 +131,7 @@ def clean_metadata(path):
     key = 0
     while True:
         try:
-            xattr.remove(path, '%s%s' % (METADATA_KEY, (key or '')))
+            xattr.removexattr(path, '%s%s' % (METADATA_KEY, (key or '')))
         except IOError as err:
             if err.errno == errno.ENODATA:
                 break
@@ -139,15 +139,15 @@ def clean_metadata(path):
         key += 1
 
 def check_user_xattr(path):
-    if not os.path.exists(path):
+    if not os_path.exists(path):
         return False
     try:
-        xattr.set(path, 'user.test.key1', 'value1')
+        xattr.setxattr(path, 'user.test.key1', 'value1')
     except IOError as err:
         logging.exception("check_user_xattr: set failed on %s err: %s", path, str(err))
         raise
     try:
-        xattr.remove(path, 'user.test.key1')
+        xattr.removexattr(path, 'user.test.key1')
     except IOError as err:
         logging.exception("check_user_xattr: remove failed on %s err: %s", path, str(err))
         #Remove xattr may fail in case of concurrent remove.
@@ -233,27 +233,30 @@ def _update_list(path, cont_path, src_list, reg_file=True, object_count=0,
     # strip the prefix off, also stripping the leading and trailing slashes
     obj_path = path.replace(cont_path, '').strip(os.path.sep)
 
-    for i in src_list:
+    for obj_name in src_list:
         if obj_path:
-            obj_list.append(os.path.join(obj_path, i))
+            obj_list.append(os.path.join(obj_path, obj_name))
         else:
-            obj_list.append(i)
+            obj_list.append(obj_name)
 
         object_count += 1
 
-        if reg_file:
-            bytes_used += os.path.getsize(path + '/' + i)
+        if Glusterfs._do_getsize and reg_file:
+            bytes_used += os_path.getsize(os.path.join(path, obj_name))
+            sleep()
 
     return object_count, bytes_used
 
 def update_list(path, cont_path, dirs=[], files=[], object_count=0,
                 bytes_used=0, obj_list=[]):
-    object_count, bytes_used = _update_list(path, cont_path, files, True,
-                                            object_count, bytes_used,
-                                            obj_list)
-    object_count, bytes_used = _update_list(path, cont_path, dirs, False,
-                                            object_count, bytes_used,
-                                            obj_list)
+    if files:
+        object_count, bytes_used = _update_list(path, cont_path, files, True,
+                                                object_count, bytes_used,
+                                                obj_list)
+    if dirs:
+        object_count, bytes_used = _update_list(path, cont_path, dirs, False,
+                                                object_count, bytes_used,
+                                                obj_list)
     return object_count, bytes_used
 
 
@@ -274,13 +277,14 @@ def _get_container_details_from_fs(cont_path):
     obj_list = []
     dir_list = []
 
-    if os.path.isdir(cont_path):
-        for (path, dirs, files) in os.walk(cont_path):
+    if os_path.isdir(cont_path):
+        for (path, dirs, files) in do_walk(cont_path):
             object_count, bytes_used = update_list(path, cont_path, dirs, files,
                                                    object_count, bytes_used,
                                                    obj_list)
 
             dir_list.append((path, do_stat(path).st_mtime))
+            sleep()
 
     return ContainerDetails(bytes_used, object_count, obj_list, dir_list)
 
@@ -333,7 +337,7 @@ def _get_account_details_from_fs(acc_path, acc_stats):
         for name in do_listdir(acc_path):
             if name.lower() == TEMP_DIR \
                     or name.lower() == ASYNCDIR \
-                    or not os.path.isdir(os.path.join(acc_path, name)):
+                    or not os_path.isdir(os.path.join(acc_path, name)):
                 continue
             container_count += 1
             container_list.append(name)
@@ -381,7 +385,7 @@ def get_object_metadata(obj_path):
     Return metadata of object.
     """
     try:
-        stats = os.stat(obj_path)
+        stats = do_stat(obj_path)
     except OSError as e:
         if e.errno != errno.ENOENT:
             raise
@@ -416,8 +420,8 @@ def get_container_metadata(cont_path, memcache=None):
     bytes_used = 0
     objects, object_count, bytes_used = get_container_details(cont_path, memcache)
     metadata = {X_TYPE: CONTAINER,
-                X_TIMESTAMP: normalize_timestamp(os.path.getctime(cont_path)),
-                X_PUT_TIMESTAMP: normalize_timestamp(os.path.getmtime(cont_path)),
+                X_TIMESTAMP: normalize_timestamp(os_path.getctime(cont_path)),
+                X_PUT_TIMESTAMP: normalize_timestamp(os_path.getmtime(cont_path)),
                 X_OBJECTS_COUNT: object_count,
                 X_BYTES_USED: bytes_used}
     return _add_timestamp(metadata)
@@ -427,8 +431,8 @@ def get_account_metadata(acc_path, memcache=None):
     container_count = 0
     containers, container_count = get_account_details(acc_path, memcache)
     metadata = {X_TYPE: ACCOUNT,
-                X_TIMESTAMP: normalize_timestamp(os.path.getctime(acc_path)),
-                X_PUT_TIMESTAMP: normalize_timestamp(os.path.getmtime(acc_path)),
+                X_TIMESTAMP: normalize_timestamp(os_path.getctime(acc_path)),
+                X_PUT_TIMESTAMP: normalize_timestamp(os_path.getmtime(acc_path)),
                 X_OBJECTS_COUNT: 0,
                 X_BYTES_USED: 0,
                 X_CONTAINER_COUNT: container_count}
@@ -479,9 +483,13 @@ def write_pickle(obj, dest, tmp=None, pickle_protocol=0):
     tmppath = os.path.join(dirname, tmpname)
     with open(tmppath, 'wb') as fo:
         pickle.dump(obj, fo, pickle_protocol)
+        # TODO: This flush() method call turns into a flush() system call
+        # We'll need to wrap this as well, but we would do this by writing
+        #a context manager for our own open() method which returns an object
+        # in fo which makes the gluster API call.
         fo.flush()
-        os.fsync(fo)
-    os.rename(tmppath, dest)
+        do_fsync(fo)
+    do_rename(tmppath, dest)
 
 # Over-ride Swift's utils.write_pickle with ours
 import swift.common.utils

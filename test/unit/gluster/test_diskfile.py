@@ -66,6 +66,21 @@ def _mock_do_unlink(f):
     raise ose
 
 
+def _mock_do_unlink_eacces_err(f):
+    ose = OSError()
+    ose.errno = errno.EACCES
+    raise ose
+
+def _mock_getsize_eaccess_err(f):
+    ose = OSError()
+    ose.errno = errno.EACCES
+    raise ose
+
+def _mock_do_rmdir_eacces_err(f):
+    ose = OSError()
+    ose.errno = errno.EACCES
+    raise ose
+
 class MockRenamerCalled(Exception):
     pass
 
@@ -108,7 +123,6 @@ class TestDiskFile(unittest.TestCase):
         assert gdf.datadir == "/tmp/foo/vol0/bar"
         assert gdf.device_path == "/tmp/foo/vol0"
         assert gdf._container_path == "/tmp/foo/vol0/bar"
-        assert gdf.tmpdir == "/tmp/foo/vol0/tmp"
         assert gdf.disk_chunk_size == 65536
         assert gdf.iter_hook == None
         assert gdf.logger == self.lg
@@ -134,7 +148,6 @@ class TestDiskFile(unittest.TestCase):
         assert gdf.name == "bar/b/a"
         assert gdf.datadir == "/tmp/foo/vol0/bar/b/a"
         assert gdf.device_path == "/tmp/foo/vol0"
-        assert gdf.tmpdir == "/tmp/foo/vol0/tmp"
 
     def test_constructor_no_metadata(self):
         td = tempfile.mkdtemp()
@@ -656,13 +669,16 @@ class TestDiskFile(unittest.TestCase):
             os.chmod(the_path, stats.st_mode & (~stat.S_IWUSR))
 
             # Handle the case do_unlink() raises an OSError
+            __os_unlink = os.unlink
+            os.unlink = _mock_do_unlink_eacces_err
             try:
                 gdf.unlinkold(normalize_timestamp(later))
             except OSError as e:
-                assert e.errno != errno.ENOENT
+                assert e.errno == errno.EACCES
             else:
                 self.fail("Excepted an OSError when unlinking file")
             finally:
+                os.unlink = __os_unlink
                 os.chmod(the_path, stats.st_mode)
 
             assert os.path.isdir(gdf.datadir)
@@ -701,11 +717,14 @@ class TestDiskFile(unittest.TestCase):
 
             stats = os.stat(gdf.datadir)
             os.chmod(gdf.datadir, 0)
+            __os_rmdir = os.rmdir
+            os.rmdir = _mock_do_rmdir_eacces_err
             try:
                 later = float(gdf.metadata['X-Timestamp']) + 1
                 gdf.unlinkold(normalize_timestamp(later))
             finally:
                 os.chmod(gdf.datadir, stats.st_mode)
+                os.rmdir = __os_rmdir
             assert os.path.isdir(gdf.datadir)
             assert os.path.isdir(gdf.data_file)
         finally:
@@ -797,13 +816,16 @@ class TestDiskFile(unittest.TestCase):
             assert not gdf._is_dir
             stats = os.stat(the_path)
             os.chmod(the_path, 0)
+            __os_path_getsize = os.path.getsize
+            os.path.getsize = _mock_getsize_eaccess_err
             try:
                 s = gdf.get_data_file_size()
             except OSError as err:
-                assert err.errno != errno.ENOENT
+                assert err.errno == errno.EACCES
             else:
                 self.fail("Expected OSError exception")
             finally:
+                os.path.getsize = __os_path_getsize
                 os.chmod(the_path, stats.st_mode)
         finally:
             shutil.rmtree(td)
@@ -848,10 +870,11 @@ class TestDiskFile(unittest.TestCase):
                                    "dir/z", self.lg)
             saved_tmppath = ''
             with gdf.mkstemp() as fd:
-                assert gdf.tmpdir == os.path.join(td, "vol0", "tmp")
-                assert os.path.isdir(gdf.tmpdir)
+                assert gdf.datadir == os.path.join(td, "vol0", "bar", "dir")
+                assert os.path.isdir(gdf.datadir)
                 saved_tmppath = gdf.tmppath
-                assert os.path.dirname(saved_tmppath) == gdf.tmpdir
+                assert os.path.dirname(saved_tmppath) == gdf.datadir
+                assert os.path.basename(saved_tmppath)[:3] == '.z.'
                 assert os.path.exists(saved_tmppath)
                 os.write(fd, "123")
             assert not os.path.exists(saved_tmppath)
@@ -867,13 +890,22 @@ class TestDiskFile(unittest.TestCase):
                                    "dir/z", self.lg)
             saved_tmppath = ''
             with gdf.mkstemp() as fd:
-                assert gdf.tmpdir == os.path.join(td, "vol0", "tmp")
-                assert os.path.isdir(gdf.tmpdir)
+                assert gdf.datadir == os.path.join(td, "vol0", "bar", "dir")
+                assert os.path.isdir(gdf.datadir)
                 saved_tmppath = gdf.tmppath
-                assert os.path.dirname(saved_tmppath) == gdf.tmpdir
+                assert os.path.dirname(saved_tmppath) == gdf.datadir
+                assert os.path.basename(saved_tmppath)[:3] == '.z.'
                 assert os.path.exists(saved_tmppath)
                 os.write(fd, "123")
+            # At the end of previous with block a close on fd is called.
+            # Calling os.close on the same fd will raise an OSError
+            # exception and we must catch it.
+            try:
                 os.close(fd)
+            except OSError as err:
+                pass
+            else:
+                self.fail("Exception expected")
             assert not os.path.exists(saved_tmppath)
         finally:
             shutil.rmtree(td)
@@ -887,10 +919,11 @@ class TestDiskFile(unittest.TestCase):
                                    "dir/z", self.lg)
             saved_tmppath = ''
             with gdf.mkstemp() as fd:
-                assert gdf.tmpdir == os.path.join(td, "vol0", "tmp")
-                assert os.path.isdir(gdf.tmpdir)
+                assert gdf.datadir == os.path.join(td, "vol0", "bar", "dir")
+                assert os.path.isdir(gdf.datadir)
                 saved_tmppath = gdf.tmppath
-                assert os.path.dirname(saved_tmppath) == gdf.tmpdir
+                assert os.path.dirname(saved_tmppath) == gdf.datadir
+                assert os.path.basename(saved_tmppath)[:3] == '.z.'
                 assert os.path.exists(saved_tmppath)
                 os.write(fd, "123")
                 os.unlink(saved_tmppath)
