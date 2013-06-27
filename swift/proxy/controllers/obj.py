@@ -37,13 +37,13 @@ from eventlet.queue import Queue
 from eventlet.timeout import Timeout
 
 from swift.common.utils import ContextPool, normalize_timestamp, \
-    config_true_value, public, json, csv_append
+    config_true_value, public, json, csv_append, GreenthreadSafeIterator
 from swift.common.bufferedhttp import http_connect
 from swift.common.constraints import check_metadata, check_object_creation, \
-    CONTAINER_LISTING_LIMIT, MAX_FILE_SIZE
+    CONTAINER_LISTING_LIMIT, MAX_FILE_SIZE, MAX_BUFFERED_SLO_SEGMENTS
 from swift.common.exceptions import ChunkReadTimeout, \
     ChunkWriteTimeout, ConnectionTimeout, ListingIterNotFound, \
-    ListingIterNotAuthorized, ListingIterError, SloSegmentError
+    ListingIterNotAuthorized, ListingIterError, SegmentError
 from swift.common.http import is_success, is_client_error, HTTP_CONTINUE, \
     HTTP_CREATED, HTTP_MULTIPLE_CHOICES, HTTP_NOT_FOUND, HTTP_CONFLICT, \
     HTTP_INTERNAL_SERVER_ERROR, HTTP_SERVICE_UNAVAILABLE, \
@@ -53,16 +53,34 @@ from swift.proxy.controllers.base import Controller, delay_denial, \
 from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPNotFound, \
     HTTPPreconditionFailed, HTTPRequestEntityTooLarge, HTTPRequestTimeout, \
     HTTPServerError, HTTPServiceUnavailable, Request, Response, \
-    HTTPClientDisconnect
+    HTTPClientDisconnect, HTTPNotImplemented
 
 
-def segment_listing_iter(listing):
-    listing = iter(listing)
-    while True:
-        seg_dict = listing.next()
-        if isinstance(seg_dict['name'], unicode):
-            seg_dict['name'] = seg_dict['name'].encode('utf-8')
-        yield seg_dict
+class SegmentListing(object):
+
+    def __init__(self, listing):
+        self.listing = iter(listing)
+        self._prepended_segments = []
+
+    def prepend_segments(self, new_segs):
+        """
+        Will prepend given segments to listing when iterating.
+        :raises SegmentError: when # segments > MAX_BUFFERED_SLO_SEGMENTS
+        """
+        new_segs.extend(self._prepended_segments)
+        if len(new_segs) > MAX_BUFFERED_SLO_SEGMENTS:
+            raise SegmentError('Too many unread slo segments in buffer')
+        self._prepended_segments = new_segs
+
+    def listing_iter(self):
+        while True:
+            if self._prepended_segments:
+                seg_dict = self._prepended_segments.pop(0)
+            else:
+                seg_dict = self.listing.next()
+            if isinstance(seg_dict['name'], unicode):
+                seg_dict['name'] = seg_dict['name'].encode('utf-8')
+            yield seg_dict
 
 
 def copy_headers_into(from_r, to_r):
@@ -104,26 +122,35 @@ class SegmentedIterable(object):
                     'bytes' keys.
     :param response: The swob.Response this iterable is associated with, if
                      any (default: None)
+    :param is_slo: A boolean, defaults to False, as to whether this references
+                   a SLO object.
+    :param max_lo_time: Defaults to 86400. The connection for the
+                        SegmentedIterable will drop after that many seconds.
     """
 
     def __init__(self, controller, container, listing, response=None,
-                 is_slo=False):
+                 is_slo=False, max_lo_time=86400):
         self.controller = controller
         self.container = container
-        self.listing = segment_listing_iter(listing)
+        self.segment_listing = SegmentListing(listing)
+        self.listing = self.segment_listing.listing_iter()
         self.is_slo = is_slo
+        self.max_lo_time = max_lo_time
         self.ratelimit_index = 0
         self.segment_dict = None
         self.segment_peek = None
         self.seek = 0
+        self.length = None
         self.segment_iter = None
         # See NOTE: swift_conn at top of file about this.
         self.segment_iter_swift_conn = None
         self.position = 0
+        self.have_yielded_data = False
         self.response = response
         if not self.response:
             self.response = Response()
         self.next_get_time = 0
+        self.start_time = time.time()
 
     def _load_next_segment(self):
         """
@@ -134,6 +161,9 @@ class SegmentedIterable(object):
         """
         try:
             self.ratelimit_index += 1
+            if time.time() - self.start_time > self.max_lo_time:
+                raise SegmentError(
+                    _('Max LO GET time of %s exceeded.') % self.max_lo_time)
             self.segment_dict = self.segment_peek or self.listing.next()
             self.segment_peek = None
             if self.container is None:
@@ -145,8 +175,17 @@ class SegmentedIterable(object):
                 self.controller.account_name, container, obj)
             path = '/%s/%s/%s' % (self.controller.account_name, container, obj)
             req = Request.blank(path)
-            if self.seek:
-                req.range = 'bytes=%s-' % self.seek
+            if self.seek or (self.length and self.length > 0):
+                bytes_available = self.segment_dict['bytes'] - self.seek
+                range_tail = ''
+                if self.length:
+                    if bytes_available >= self.length:
+                        range_tail = self.seek + self.length - 1
+                        self.length = 0
+                    else:
+                        self.length -= bytes_available
+                if self.seek or range_tail:
+                    req.range = 'bytes=%s-%s' % (self.seek, range_tail)
                 self.seek = 0
             if not self.is_slo and self.ratelimit_index > \
                     self.controller.app.rate_limit_after_segment:
@@ -157,7 +196,7 @@ class SegmentedIterable(object):
                 req, _('Object'), self.controller.app.object_ring, partition,
                 path)
             if self.is_slo and resp.status_int == HTTP_NOT_FOUND:
-                raise SloSegmentError(_(
+                raise SegmentError(_(
                     'Could not load object segment %(path)s:'
                     ' %(status)s') % {'path': path, 'status': resp.status_int})
             if not is_success(resp.status_int):
@@ -165,21 +204,41 @@ class SegmentedIterable(object):
                     'Could not load object segment %(path)s:'
                     ' %(status)s') % {'path': path, 'status': resp.status_int})
             if self.is_slo:
-                if resp.etag != self.segment_dict['hash']:
-                    raise SloSegmentError(_(
-                        'Object segment no longer valid: '
-                        '%(path)s etag: %(r_etag)s != %(s_etag)s.' %
-                        {'path': path, 'r_etag': resp.etag,
-                         's_etag': self.segment_dict['hash']}))
                 if 'X-Static-Large-Object' in resp.headers:
-                    raise SloSegmentError(_(
-                        'SLO can not be made of other SLOs: %s' % path))
+                    # this segment is a nested slo object. read in the body
+                    # and add its segments into this slo.
+                    try:
+                        sub_manifest = json.loads(resp.body)
+                        self.segment_listing.prepend_segments(sub_manifest)
+                        sub_etag = md5(''.join(
+                            o['hash'] for o in sub_manifest)).hexdigest()
+                        if sub_etag != self.segment_dict['hash']:
+                            raise SegmentError(_(
+                                'Object segment does not match sub-slo: '
+                                '%(path)s etag: %(r_etag)s != %(s_etag)s.' %
+                                {'path': path, 'r_etag': sub_etag,
+                                 's_etag': self.segment_dict['hash']}))
+                        return self._load_next_segment()
+                    except ValueError:
+                        raise SegmentError(_(
+                            'Sub SLO has invalid manifest: %s' % path))
+
+                elif resp.etag != self.segment_dict['hash'] or \
+                        resp.content_length != self.segment_dict['bytes']:
+                    raise SegmentError(_(
+                        'Object segment no longer valid: '
+                        '%(path)s etag: %(r_etag)s != %(s_etag)s or '
+                        '%(r_size)s != %(s_size)s.' %
+                        {'path': path, 'r_etag': resp.etag,
+                         'r_size': resp.content_length,
+                         's_etag': self.segment_dict['hash'],
+                         's_size': self.segment_dict['bytes']}))
             self.segment_iter = resp.app_iter
             # See NOTE: swift_conn at top of file about this.
             self.segment_iter_swift_conn = getattr(resp, 'swift_conn', None)
         except StopIteration:
             raise
-        except SloSegmentError, err:
+        except SegmentError, err:
             if not getattr(err, 'swift_logged', False):
                 self.controller.app.logger.error(_(
                     'ERROR: While processing manifest '
@@ -189,7 +248,7 @@ class SegmentedIterable(object):
                      'obj': self.controller.object_name, 'err': err})
                 err.swift_logged = True
                 self.response.status_int = HTTP_CONFLICT
-            raise StopIteration('Invalid manifiest segment')
+            raise
         except (Exception, Timeout), err:
             if not getattr(err, 'swift_logged', False):
                 self.controller.app.logger.exception(_(
@@ -217,10 +276,25 @@ class SegmentedIterable(object):
                             chunk = self.segment_iter.next()
                             break
                         except StopIteration:
-                            self._load_next_segment()
+                            if self.length is None or self.length > 0:
+                                self._load_next_segment()
+                            else:
+                                return
                 self.position += len(chunk)
+                self.have_yielded_data = True
                 yield chunk
         except StopIteration:
+            raise
+        except SegmentError:
+            if not self.have_yielded_data:
+                # Normally, exceptions before any data has been yielded will
+                # cause Eventlet to send a 5xx response. In this particular
+                # case of SegmentError we don't want that and we'd rather
+                # just send the normal 2xx response and then hang up early
+                # since 5xx codes are often used to judge Service Level
+                # Agreements and this SegmentError indicates the user has
+                # created an invalid condition.
+                yield ' '
             raise
         except (Exception, Timeout), err:
             if not getattr(err, 'swift_logged', False):
@@ -254,14 +328,18 @@ class SegmentedIterable(object):
                 start = 0
             if stop is not None:
                 length = stop - start
+                self.length = length
             else:
                 length = None
             for chunk in self:
                 if length is not None:
                     length -= len(chunk)
-                    if length < 0:
-                        # Chop off the extra:
-                        yield chunk[:length]
+                    if length <= 0:
+                        if length < 0:
+                            # Chop off the extra:
+                            yield chunk[:length]
+                        else:
+                            yield chunk
                         break
                 yield chunk
             # See NOTE: swift_conn at top of file about this.
@@ -364,6 +442,44 @@ class ObjectController(Controller):
         except ListingIterNotAuthorized:
             pass
 
+    def iter_nodes_local_first(self, ring, partition):
+        """
+        Yields nodes for a ring partition.
+
+        If the 'write_affinity' setting is non-empty, then this will yield N
+        local nodes (as defined by the write_affinity setting) first, then the
+        rest of the nodes as normal. It is a re-ordering of the nodes such
+        that the local ones come first; no node is omitted. The effect is
+        that the request will be serviced by local object servers first, but
+        nonlocal ones will be employed if not enough local ones are available.
+
+        :param ring: ring to get nodes from
+        :param partition: ring partition to yield nodes for
+        """
+
+        primary_nodes = ring.get_part_nodes(partition)
+        num_locals = self.app.write_affinity_node_count(ring)
+        is_local = self.app.write_affinity_is_local_fn
+
+        if is_local is None:
+            return self.iter_nodes(ring, partition)
+
+        all_nodes = itertools.chain(primary_nodes,
+                                    ring.get_more_nodes(partition))
+        first_n_local_nodes = list(itertools.islice(
+            itertools.ifilter(is_local, all_nodes), num_locals))
+
+        # refresh it; it moved when we computed first_n_local_nodes
+        all_nodes = itertools.chain(primary_nodes,
+                                    ring.get_more_nodes(partition))
+        local_first_node_iter = itertools.chain(
+            first_n_local_nodes,
+            itertools.ifilter(lambda node: node not in first_n_local_nodes,
+                              all_nodes))
+
+        return self.iter_nodes(
+            ring, partition, node_iter=local_first_node_iter)
+
     def is_good_source(self, src):
         """
         Indicates whether or not the request made to the backend found
@@ -377,8 +493,8 @@ class ObjectController(Controller):
 
     def GETorHEAD(self, req):
         """Handle HTTP GET or HEAD requests."""
-        container_info = self.container_info(self.account_name,
-                                             self.container_name)
+        container_info = self.container_info(
+            self.account_name, self.container_name, req)
         req.acl = container_info['read_acl']
         if 'swift.authorize' in req.environ:
             aresp = req.environ['swift.authorize'](req)
@@ -477,7 +593,8 @@ class ObjectController(Controller):
                 else:
                     resp.app_iter = SegmentedIterable(
                         self, lcontainer, listing, resp,
-                        is_slo=(large_object == 'SLO'))
+                        is_slo=(large_object == 'SLO'),
+                        max_lo_time=self.app.max_large_object_get_time)
 
             else:
                 # For objects with a reasonable number of segments, we'll serve
@@ -504,7 +621,8 @@ class ObjectController(Controller):
                                 conditional_response=True)
                 resp.app_iter = SegmentedIterable(
                     self, lcontainer, listing, resp,
-                    is_slo=(large_object == 'SLO'))
+                    is_slo=(large_object == 'SLO'),
+                    max_lo_time=self.app.max_large_object_get_time)
                 resp.content_length = content_length
                 resp.last_modified = last_modified
                 resp.etag = etag
@@ -568,8 +686,7 @@ class ObjectController(Controller):
             if error_response:
                 return error_response
             container_info = self.container_info(
-                self.account_name, self.container_name,
-                account_autocreate=self.app.account_autocreate)
+                self.account_name, self.container_name, req)
             container_partition = container_info['partition']
             containers = container_info['nodes']
             req.acl = container_info['write_acl']
@@ -590,6 +707,8 @@ class ObjectController(Controller):
                     return HTTPBadRequest(request=req,
                                           content_type='text/plain',
                                           body='Non-integer X-Delete-At')
+                req.environ.setdefault('swift.log_info', []).append(
+                    'x-delete-at:%d' % x_delete_at)
                 delete_at_container = str(
                     x_delete_at /
                     self.app.expiring_objects_container_divisor *
@@ -598,14 +717,14 @@ class ObjectController(Controller):
                     self.app.container_ring.get_nodes(
                         self.app.expiring_objects_account, delete_at_container)
             else:
-                delete_at_part = delete_at_nodes = None
+                delete_at_container = delete_at_part = delete_at_nodes = None
             partition, nodes = self.app.object_ring.get_nodes(
                 self.account_name, self.container_name, self.object_name)
             req.headers['X-Timestamp'] = normalize_timestamp(time.time())
 
             headers = self._backend_requests(
                 req, len(nodes), container_partition, containers,
-                delete_at_part, delete_at_nodes)
+                delete_at_container, delete_at_part, delete_at_nodes)
 
             resp = self.make_requests(req, self.app.object_ring, partition,
                                       'POST', req.path_info, headers)
@@ -613,8 +732,9 @@ class ObjectController(Controller):
 
     def _backend_requests(self, req, n_outgoing,
                           container_partition, containers,
-                          delete_at_partition=None, delete_at_nodes=None):
-        headers = [dict(req.headers.iteritems())
+                          delete_at_container=None, delete_at_partition=None,
+                          delete_at_nodes=None):
+        headers = [self.generate_request_headers(req, additional=req.headers)
                    for _junk in range(n_outgoing)]
 
         for header in headers:
@@ -634,6 +754,7 @@ class ObjectController(Controller):
         for i, node in enumerate(delete_at_nodes or []):
             i = i % len(headers)
 
+            headers[i]['X-Delete-At-Container'] = delete_at_container
             headers[i]['X-Delete-At-Partition'] = delete_at_partition
             headers[i]['X-Delete-At-Host'] = csv_append(
                 headers[i].get('X-Delete-At-Host'),
@@ -692,8 +813,7 @@ class ObjectController(Controller):
     def PUT(self, req):
         """HTTP PUT request handler."""
         container_info = self.container_info(
-            self.account_name, self.container_name,
-            account_autocreate=self.app.account_autocreate)
+            self.account_name, self.container_name, req)
         container_partition = container_info['partition']
         containers = container_info['nodes']
         req.acl = container_info['write_acl']
@@ -705,6 +825,16 @@ class ObjectController(Controller):
                 return aresp
         if not containers:
             return HTTPNotFound(request=req)
+        try:
+            ml = req.message_length()
+        except ValueError as e:
+            return HTTPBadRequest(request=req, content_type='text/plain',
+                                  body=str(e))
+        except AttributeError as e:
+            return HTTPNotImplemented(request=req, content_type='text/plain',
+                                      body=str(e))
+        if ml is not None and ml > MAX_FILE_SIZE:
+            return HTTPRequestEntityTooLarge(request=req)
         if 'x-delete-after' in req.headers:
             try:
                 x_delete_after = int(req.headers['x-delete-after'])
@@ -856,6 +986,8 @@ class ObjectController(Controller):
             except ValueError:
                 return HTTPBadRequest(request=req, content_type='text/plain',
                                       body='Non-integer X-Delete-At')
+            req.environ.setdefault('swift.log_info', []).append(
+                'x-delete-at:%d' % x_delete_at)
             delete_at_container = str(
                 x_delete_at /
                 self.app.expiring_objects_container_divisor *
@@ -864,15 +996,17 @@ class ObjectController(Controller):
                 self.app.container_ring.get_nodes(
                     self.app.expiring_objects_account, delete_at_container)
         else:
-            delete_at_part = delete_at_nodes = None
+            delete_at_container = delete_at_part = delete_at_nodes = None
 
-        node_iter = self.iter_nodes(self.app.object_ring, partition)
+        node_iter = GreenthreadSafeIterator(
+            self.iter_nodes_local_first(self.app.object_ring, partition))
         pile = GreenPile(len(nodes))
-        chunked = req.headers.get('transfer-encoding')
+        te = req.headers.get('transfer-encoding', '')
+        chunked = ('chunked' in te)
 
         outgoing_headers = self._backend_requests(
             req, len(nodes), container_partition, containers,
-            delete_at_part, delete_at_nodes)
+            delete_at_container, delete_at_part, delete_at_nodes)
 
         for nheaders in outgoing_headers:
             # RFC2616:8.2.3 disallows 100-continue without a body
@@ -969,7 +1103,7 @@ class ObjectController(Controller):
             self.app.logger.error(
                 _('Object servers returned %s mismatched etags'), len(etags))
             return HTTPServerError(request=req)
-        etag = len(etags) and etags.pop() or None
+        etag = etags.pop() if len(etags) else None
         while len(statuses) < len(nodes):
             statuses.append(HTTP_SERVICE_UNAVAILABLE)
             reasons.append('')
@@ -991,8 +1125,8 @@ class ObjectController(Controller):
     @delay_denial
     def DELETE(self, req):
         """HTTP DELETE request handler."""
-        container_info = self.container_info(self.account_name,
-                                             self.container_name)
+        container_info = self.container_info(
+            self.account_name, self.container_name, req)
         container_partition = container_info['partition']
         containers = container_info['nodes']
         req.acl = container_info['write_acl']
@@ -1043,8 +1177,8 @@ class ObjectController(Controller):
                 self.container_name = lcontainer
                 self.object_name = last_item['name']
                 new_del_req = Request.blank(copy_path, environ=req.environ)
-                container_info = self.container_info(self.account_name,
-                                                     self.container_name)
+                container_info = self.container_info(
+                    self.account_name, self.container_name, req)
                 container_partition = container_info['partition']
                 containers = container_info['nodes']
                 new_del_req.acl = container_info['write_acl']

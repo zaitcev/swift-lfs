@@ -2,6 +2,7 @@
 *.sw?
 doc/build/*
 dist
+build
 ChangeLog
 .coverage
 gluster_swift_ufo.egg-info

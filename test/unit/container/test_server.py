@@ -15,6 +15,7 @@
 
 import operator
 import os
+import mock
 import unittest
 from contextlib import contextmanager
 from shutil import rmtree
@@ -24,7 +25,7 @@ from tempfile import mkdtemp
 from eventlet import spawn, Timeout, listen
 import simplejson
 
-from swift.common.swob import Request
+from swift.common.swob import Request, HeaderKeyDict
 import swift.container
 from swift.container import server as container_server
 from swift.common.utils import normalize_timestamp, mkdirs
@@ -137,13 +138,17 @@ class TestContainerController(unittest.TestCase):
         self.assertEquals(resp.status_int, 507)
 
     def test_HEAD_invalid_content_type(self):
-        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT',
-                                                  'HTTP_X_TIMESTAMP': '0'})
-        self.controller.PUT(req)
         req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'HEAD'},
                             headers={'Accept': 'application/plain'})
         resp = self.controller.HEAD(req)
         self.assertEquals(resp.status_int, 406)
+
+    def test_HEAD_invalid_format(self):
+        format = '%D1%BD%8A9'  # invalid UTF-8; should be %E1%BD%8A9 (E -> D)
+        req = Request.blank('/sda1/p/a/c?format=' + format,
+                            environ={'REQUEST_METHOD': 'HEAD'})
+        resp = self.controller.HEAD(req)
+        self.assertEquals(resp.status_int, 400)
 
     def test_PUT(self):
         req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT',
@@ -701,10 +706,6 @@ class TestContainerController(unittest.TestCase):
         self.assertEquals(resp.status_int, 507)
 
     def test_GET_over_limit(self):
-        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT'},
-                            headers={'X-Timestamp': '0'})
-        resp = self.controller.PUT(req)
-        self.assertEquals(resp.status_int, 201)
         req = Request.blank('/sda1/p/a/c?limit=%d' %
             (container_server.CONTAINER_LISTING_LIMIT + 1),
             environ={'REQUEST_METHOD': 'GET'})
@@ -721,7 +722,7 @@ class TestContainerController(unittest.TestCase):
             environ={'REQUEST_METHOD': 'GET'})
         resp = self.controller.GET(req)
         self.assertEquals(resp.status_int, 200)
-        self.assertEquals(eval(resp.body), [])
+        self.assertEquals(simplejson.loads(resp.body), [])
         # fill the container
         for i in range(3):
             req = Request.blank('/sda1/p/a/jsonc/%s' % i, environ={
@@ -753,7 +754,7 @@ class TestContainerController(unittest.TestCase):
                 environ={'REQUEST_METHOD': 'GET'})
         resp = self.controller.GET(req)
         self.assertEquals(resp.content_type, 'application/json')
-        self.assertEquals(eval(resp.body), json_body)
+        self.assertEquals(simplejson.loads(resp.body), json_body)
         self.assertEquals(resp.charset, 'utf-8')
 
         resp = self.controller.HEAD(req)
@@ -765,7 +766,7 @@ class TestContainerController(unittest.TestCase):
                     environ={'REQUEST_METHOD': 'GET'})
             req.accept = accept
             resp = self.controller.GET(req)
-            self.assertEquals(eval(resp.body), json_body,
+            self.assertEquals(simplejson.loads(resp.body), json_body,
                 'Invalid body for Accept: %s' % accept)
             self.assertEquals(resp.content_type, 'application/json',
                 'Invalid content_type for Accept: %s' % accept)
@@ -870,7 +871,7 @@ class TestContainerController(unittest.TestCase):
                 environ={'REQUEST_METHOD': 'GET'})
         resp = self.controller.GET(req)
         self.assertEquals(resp.content_type, 'application/json')
-        self.assertEquals(eval(resp.body), json_body)
+        self.assertEquals(simplejson.loads(resp.body), json_body)
         self.assertEquals(resp.charset, 'utf-8')
 
     def test_GET_xml(self):
@@ -1028,6 +1029,13 @@ class TestContainerController(unittest.TestCase):
         resp = self.controller.GET(req)
         self.assertEquals(resp.body.split(), ['a1', 'a2', 'a3'])
 
+    def test_GET_delimiter_too_long(self):
+        req = Request.blank('/sda1/p/a/c?delimiter=xx',
+                            environ={'REQUEST_METHOD': 'GET',
+                                     'HTTP_X_TIMESTAMP': '0'})
+        resp = self.controller.GET(req)
+        self.assertEquals(resp.status_int, 412)
+
     def test_GET_delimiter(self):
         req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT',
             'HTTP_X_TIMESTAMP': '0'})
@@ -1067,6 +1075,26 @@ class TestContainerController(unittest.TestCase):
             '\n<container name="c"><subdir name="US-OK-"><name>US-OK-</name></subdir>'
             '<subdir name="US-TX-"><name>US-TX-</name></subdir>'
             '<subdir name="US-UT-"><name>US-UT-</name></subdir></container>')
+
+    def test_GET_delimiter_xml_with_quotes(self):
+        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT',
+            'HTTP_X_TIMESTAMP': '0'})
+        resp = self.controller.PUT(req)
+        req = Request.blank('/sda1/p/a/c/<\'sub\' "dir">/object',
+            environ={
+                'REQUEST_METHOD': 'PUT', 'HTTP_X_TIMESTAMP': '1',
+                'HTTP_X_CONTENT_TYPE': 'text/plain', 'HTTP_X_ETAG': 'x',
+                'HTTP_X_SIZE': 0})
+        resp = self.controller.PUT(req)
+        self.assertEquals(resp.status_int, 201)
+        req = Request.blank('/sda1/p/a/c?delimiter=/&format=xml',
+                environ={'REQUEST_METHOD': 'GET'})
+        resp = self.controller.GET(req)
+        self.assertEquals(
+            resp.body,
+            '<?xml version="1.0" encoding="UTF-8"?>\n<container name="c">'
+            '<subdir name="&lt;\'sub\' &quot;dir&quot;&gt;/">'
+            '<name>&lt;\'sub\' "dir"&gt;/</name></subdir></container>')
 
     def test_GET_path(self):
         req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT',
@@ -1212,18 +1240,31 @@ class TestContainerController(unittest.TestCase):
             self.assertEquals(resp.status_int, 200)
 
     def test_params_utf8(self):
-        self.controller.PUT(Request.blank('/sda1/p/a/c',
-                            headers={'X-Timestamp': normalize_timestamp(1)},
-                            environ={'REQUEST_METHOD': 'PUT'}))
-        for param in ('delimiter', 'limit', 'marker', 'path', 'prefix'):
+        # Bad UTF8 sequence, all parameters should cause 400 error
+        for param in ('delimiter', 'limit', 'marker', 'path', 'prefix',
+                      'end_marker', 'format'):
             req = Request.blank('/sda1/p/a/c?%s=\xce' % param,
                                 environ={'REQUEST_METHOD': 'GET'})
             resp = self.controller.GET(req)
-            self.assertEquals(resp.status_int, 400)
+            self.assertEquals(resp.status_int, 400,
+                              "%d on param %s" % (resp.status_int, param))
+        # Good UTF8 sequence for delimiter, too long (1 byte delimiters only)
+        req = Request.blank('/sda1/p/a/c?delimiter=\xce\xa9',
+                            environ={'REQUEST_METHOD': 'GET'})
+        resp = self.controller.GET(req)
+        self.assertEquals(resp.status_int, 412,
+                          "%d on param delimiter" % (resp.status_int))
+        self.controller.PUT(Request.blank('/sda1/p/a/c',
+                            headers={'X-Timestamp': normalize_timestamp(1)},
+                            environ={'REQUEST_METHOD': 'PUT'}))
+        # Good UTF8 sequence, ignored for limit, doesn't affect other queries
+        for param in ('limit', 'marker', 'path', 'prefix', 'end_marker',
+                      'format'):
             req = Request.blank('/sda1/p/a/c?%s=\xce\xa9' % param,
                                 environ={'REQUEST_METHOD': 'GET'})
             resp = self.controller.GET(req)
-            self.assert_(resp.status_int in (204, 412), resp.status_int)
+            self.assertEquals(resp.status_int, 204,
+                              "%d on param %s" % (resp.status_int, param))
 
     def test_put_auto_create(self):
         headers = {'x-timestamp': normalize_timestamp(1),
@@ -1353,11 +1394,13 @@ class TestContainerController(unittest.TestCase):
              'partition': '30',
              'method': 'PUT',
              'ssl': False,
-             'headers': {'x-bytes-used': 0,
+             'headers': HeaderKeyDict({'x-bytes-used': 0,
                          'x-delete-timestamp': '0',
                          'x-object-count': 0,
                          'x-put-timestamp': '0000012345.00000',
-                         'x-trans-id': '-'}})
+                         'referer': 'PUT http://localhost/sda1/p/a/c',
+                         'user-agent': 'container-server %d' % os.getpid(),
+                         'x-trans-id': '-'})})
         self.assertEquals(
             http_connect_args[1],
             {'ipaddr': '6.7.8.9',
@@ -1367,11 +1410,130 @@ class TestContainerController(unittest.TestCase):
              'partition': '30',
              'method': 'PUT',
              'ssl': False,
-             'headers': {'x-bytes-used': 0,
+             'headers': HeaderKeyDict({'x-bytes-used': 0,
                          'x-delete-timestamp': '0',
                          'x-object-count': 0,
                          'x-put-timestamp': '0000012345.00000',
-                         'x-trans-id': '-'}})
+                         'referer': 'PUT http://localhost/sda1/p/a/c',
+                         'user-agent': 'container-server %d' % os.getpid(),
+                         'x-trans-id': '-'})})
+
+    def test_serv_reserv(self):
+        """
+        Test replication_server flag
+        was set from configuration file.
+        """
+        container_controller = container_server.ContainerController
+        conf = {'devices': self.testdir, 'mount_check': 'false'}
+        self.assertEquals(container_controller(conf).replication_server, None)
+        for val in [True, '1', 'True', 'true']:
+            conf['replication_server'] = val
+            self.assertTrue(container_controller(conf).replication_server)
+        for val in [False, 0, '0', 'False', 'false', 'test_string']:
+            conf['replication_server'] = val
+            self.assertFalse(container_controller(conf).replication_server)
+
+    def test_list_allowed_methods(self):
+        """ Test list of allowed_methods """
+        methods = ['DELETE', 'PUT', 'HEAD', 'GET', 'REPLICATE', 'POST']
+        self.assertEquals(self.controller.allowed_methods, methods)
+
+    def test_allowed_methods_from_configuration_file(self):
+        """
+        Test list of allowed_methods which
+        were set from configuration file.
+        """
+        container_controller = container_server.ContainerController
+        conf = {'devices': self.testdir, 'mount_check': 'false'}
+        self.assertEquals(container_controller(conf).allowed_methods,
+                          ['DELETE', 'PUT', 'HEAD', 'GET', 'REPLICATE',
+                           'POST'])
+        conf['replication_server'] = 'True'
+        self.assertEquals(container_controller(conf).allowed_methods,
+                          ['REPLICATE'])
+        conf['replication_server'] = 'False'
+        self.assertEquals(container_controller(conf).allowed_methods,
+                          ['DELETE', 'PUT', 'HEAD', 'GET', 'POST'])
+
+    def test_correct_allowed_method(self):
+        """
+        Test correct work for allowed method using
+        swift.container_server.ContainerController.__call__
+        """
+        inbuf = StringIO()
+        errbuf = StringIO()
+        outbuf = StringIO()
+
+        def start_response(*args):
+            """ Sends args to outbuf """
+            outbuf.writelines(args)
+
+        method = self.controller.allowed_methods[0]
+
+        env = {'REQUEST_METHOD': method,
+               'SCRIPT_NAME': '',
+               'PATH_INFO': '/sda1/p/a/c',
+               'SERVER_NAME': '127.0.0.1',
+               'SERVER_PORT': '8080',
+               'SERVER_PROTOCOL': 'HTTP/1.0',
+               'CONTENT_LENGTH': '0',
+               'wsgi.version': (1, 0),
+               'wsgi.url_scheme': 'http',
+               'wsgi.input': inbuf,
+               'wsgi.errors': errbuf,
+               'wsgi.multithread': False,
+               'wsgi.multiprocess': False,
+               'wsgi.run_once': False}
+
+        answer = ['<html><h1>Method Not Allowed</h1><p>The method is not '
+                  'allowed for this resource.</p></html>']
+
+        with mock.patch.object(self.controller, method,
+                               return_value=mock.MagicMock()) as mock_method:
+            response = self.controller.__call__(env, start_response)
+            self.assertNotEqual(response, answer)
+            self.assertEqual(mock_method.call_count, 1)
+
+    def test_not_allowed_method(self):
+        """
+        Test correct work for NOT allowed method using
+        swift.container_server.ContainerController.__call__
+        """
+        inbuf = StringIO()
+        errbuf = StringIO()
+        outbuf = StringIO()
+
+        def start_response(*args):
+            """ Sends args to outbuf """
+            outbuf.writelines(args)
+
+        method = self.controller.allowed_methods[0]
+
+        env = {'REQUEST_METHOD': method,
+               'SCRIPT_NAME': '',
+               'PATH_INFO': '/sda1/p/a/c',
+               'SERVER_NAME': '127.0.0.1',
+               'SERVER_PORT': '8080',
+               'SERVER_PROTOCOL': 'HTTP/1.0',
+               'CONTENT_LENGTH': '0',
+               'wsgi.version': (1, 0),
+               'wsgi.url_scheme': 'http',
+               'wsgi.input': inbuf,
+               'wsgi.errors': errbuf,
+               'wsgi.multithread': False,
+               'wsgi.multiprocess': False,
+               'wsgi.run_once': False}
+
+        answer = ['<html><h1>Method Not Allowed</h1><p>The method is not '
+                  'allowed for this resource.</p></html>']
+
+        with mock.patch.object(self.controller, method,
+                               return_value=mock.MagicMock()) as mock_method:
+            self.controller.allowed_methods.remove(method)
+            response = self.controller.__call__(env, start_response)
+            self.assertEqual(mock_method.call_count, 0)
+            self.assertEqual(response, answer)
+            self.controller.allowed_methods.append(method)
 
 
 if __name__ == '__main__':

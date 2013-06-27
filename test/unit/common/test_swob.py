@@ -102,6 +102,15 @@ class TestHeaderKeyDict(unittest.TestCase):
         self.assertEquals(headers.get('something-else'), None)
         self.assertEquals(headers.get('something-else', True), True)
 
+    def test_keys(self):
+        headers = swift.common.swob.HeaderKeyDict()
+        headers['content-length'] = 20
+        headers['cOnTent-tYpe'] = 'text/plain'
+        headers['SomeThing-eLse'] = 'somevalue'
+        self.assertEquals(
+            set(headers.keys()),
+            set(('Content-Length', 'Content-Type', 'Something-Else')))
+
 
 class TestRange(unittest.TestCase):
     def test_range(self):
@@ -267,6 +276,9 @@ class TestAccept(unittest.TestCase):
                                    'text/xml'])
             self.assertEquals(match, None)
 
+    def test_repr(self):
+        acc = swift.common.swob.Accept("application/json")
+        self.assertEquals(repr(acc), "application/json")
 
 class TestRequest(unittest.TestCase):
     def test_blank(self):
@@ -428,6 +440,11 @@ class TestRequest(unittest.TestCase):
                                          'QUERY_STRING': 'hello=equal&acl'})
         self.assertEqual(req.path_qs, '/hi/there?hello=equal&acl')
 
+    def test_url(self):
+        req = swift.common.swob.Request.blank('/hi/there?hello=equal&acl')
+        self.assertEqual(req.url,
+                         'http://localhost/hi/there?hello=equal&acl')
+
     def test_wsgify(self):
         used_req = []
 
@@ -502,6 +519,115 @@ class TestRequest(unittest.TestCase):
         req.query_string = u'x=\u2661'
         self.assertEquals(req.params['x'], u'\u2661'.encode('utf-8'))
 
+    def test_url(self):
+        pi = '/hi/there'
+        path = pi
+        req = swift.common.swob.Request.blank(path)
+        sche = 'http'
+        exp_url = '%(sche)s://localhost%(pi)s' % locals()
+        self.assertEqual(req.url, exp_url)
+
+        qs = 'hello=equal&acl'
+        path = '%s?%s' % (pi, qs)
+        s, p = 'unit.test.example.com', '90'
+        req = swift.common.swob.Request({'PATH_INFO': pi,
+                                         'QUERY_STRING': qs,
+                                         'SERVER_NAME': s,
+                                         'SERVER_PORT': p})
+        exp_url = '%(sche)s://%(s)s:%(p)s%(pi)s?%(qs)s' % locals()
+        self.assertEqual(req.url, exp_url)
+
+        host = 'unit.test.example.com'
+        req = swift.common.swob.Request({'PATH_INFO': pi,
+                                         'QUERY_STRING': qs,
+                                         'HTTP_HOST': host + ':80'})
+        exp_url = '%(sche)s://%(host)s%(pi)s?%(qs)s' % locals()
+        self.assertEqual(req.url, exp_url)
+
+        host = 'unit.test.example.com'
+        sche = 'https'
+        req = swift.common.swob.Request({'PATH_INFO': pi,
+                                         'QUERY_STRING': qs,
+                                         'HTTP_HOST': host + ':443',
+                                         'wsgi.url_scheme': sche})
+        exp_url = '%(sche)s://%(host)s%(pi)s?%(qs)s' % locals()
+        self.assertEqual(req.url, exp_url)
+
+        host = 'unit.test.example.com:81'
+        req = swift.common.swob.Request({'PATH_INFO': pi,
+                                         'QUERY_STRING': qs,
+                                         'HTTP_HOST': host,
+                                         'wsgi.url_scheme': sche})
+        exp_url = '%(sche)s://%(host)s%(pi)s?%(qs)s' % locals()
+        self.assertEqual(req.url, exp_url)
+
+    def test_as_referer(self):
+        pi = '/hi/there'
+        qs = 'hello=equal&acl'
+        sche = 'https'
+        host = 'unit.test.example.com:81'
+        req = swift.common.swob.Request({'REQUEST_METHOD': 'POST',
+                                         'PATH_INFO': pi,
+                                         'QUERY_STRING': qs,
+                                         'HTTP_HOST': host,
+                                         'wsgi.url_scheme': sche})
+        exp_url = '%(sche)s://%(host)s%(pi)s?%(qs)s' % locals()
+        self.assertEqual(req.as_referer(), 'POST ' + exp_url)
+
+    def test_message_length_just_content_length(self):
+        req = swift.common.swob.Request.blank(
+            u'/',
+            environ={'REQUEST_METHOD': 'PUT', 'PATH_INFO': '/'})
+        self.assertEquals(req.message_length(), None)
+
+        req = swift.common.swob.Request.blank(
+            u'/',
+            environ={'REQUEST_METHOD': 'PUT', 'PATH_INFO': '/'},
+            body='x'*42)
+        self.assertEquals(req.message_length(), 42)
+
+        req.headers['Content-Length'] = 'abc'
+        try:
+            l = req.message_length()
+        except ValueError as e:
+            self.assertEquals(str(e), "Invalid Content-Length header value")
+        else:
+            self.fail("Expected a ValueError raised for 'abc'")
+
+    def test_message_length_transfer_encoding(self):
+        req = swift.common.swob.Request.blank(
+            u'/',
+            environ={'REQUEST_METHOD': 'PUT', 'PATH_INFO': '/'},
+            headers={'transfer-encoding': 'chunked'},
+            body='x'*42)
+        self.assertEquals(req.message_length(), None)
+
+        req.headers['Transfer-Encoding'] = 'gzip,chunked'
+        try:
+            l = req.message_length()
+        except AttributeError as e:
+            self.assertEquals(str(e), "Unsupported Transfer-Coding header"
+                              " value specified in Transfer-Encoding header")
+        else:
+            self.fail("Expected an AttributeError raised for 'gzip'")
+
+        req.headers['Transfer-Encoding'] = 'gzip'
+        try:
+            l = req.message_length()
+        except ValueError as e:
+            self.assertEquals(str(e), "Invalid Transfer-Encoding header value")
+        else:
+            self.fail("Expected a ValueError raised for 'gzip'")
+
+        req.headers['Transfer-Encoding'] = 'gzip,identity'
+        try:
+            l = req.message_length()
+        except AttributeError as e:
+            self.assertEquals(str(e), "Unsupported Transfer-Coding header"
+                              " value specified in Transfer-Encoding header")
+        else:
+            self.fail("Expected an AttributeError raised for 'gzip,identity'")
+
 
 class TestStatusMap(unittest.TestCase):
     def test_status_map(self):
@@ -518,8 +644,8 @@ class TestStatusMap(unittest.TestCase):
         self.assert_('The resource could not be found.' in body)
         self.assertEquals(response_args[0], '404 Not Found')
         headers = dict(response_args[1])
-        self.assertEquals(headers['content-type'], 'text/html; charset=UTF-8')
-        self.assert_(int(headers['content-length']) > 0)
+        self.assertEquals(headers['Content-Type'], 'text/html; charset=UTF-8')
+        self.assert_(int(headers['Content-Length']) > 0)
 
 
 class TestResponse(unittest.TestCase):

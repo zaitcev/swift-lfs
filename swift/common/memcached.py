@@ -14,6 +14,30 @@
 # limitations under the License.
 
 """
+Why our own memcache client?
+By Michael Barton
+
+python-memcached doesn't use consistent hashing, so adding or
+removing a memcache server from the pool invalidates a huge
+percentage of cached items.
+
+If you keep a pool of python-memcached client objects, each client
+object has its own connection to every memcached server, only one of
+which is ever in use.  So you wind up with n * m open sockets and
+almost all of them idle. This client effectively has a pool for each
+server, so the number of backend connections is hopefully greatly
+reduced.
+
+python-memcache uses pickle to store things, and there was already a
+huge stink about Swift using pickles in memcache
+(http://osvdb.org/show/osvdb/86581).  That seemed sort of unfair,
+since nova and keystone and everyone else use pickles for memcache
+too, but it's hidden behind a "standard" library. But changing would
+be a security regression at this point.
+
+Also, pylibmc wouldn't work for us because it needs to use python
+sockets in order to play nice with eventlet.
+
 Lucid comes with memcached: v1.4.2.  Protocol documentation for that
 version is at:
 
@@ -88,13 +112,26 @@ class MemcacheRing(object):
         self._allow_pickle = allow_pickle
         self._allow_unpickle = allow_unpickle or allow_pickle
 
-    def _exception_occurred(self, server, e, action='talking'):
+    def _exception_occurred(self, server, e, action='talking',
+                            sock=None, fp=None):
         if isinstance(e, socket.timeout):
             logging.error(_("Timeout %(action)s to memcached: %(server)s"),
                           {'action': action, 'server': server})
         else:
             logging.exception(_("Error %(action)s to memcached: %(server)s"),
                               {'action': action, 'server': server})
+        try:
+            if fp:
+                fp.close()
+                del fp
+        except Exception:
+            pass
+        try:
+            if sock:
+                sock.close()
+                del sock
+        except Exception:
+            pass
         now = time.time()
         self._errors[server].append(time.time())
         if len(self._errors[server]) > ERROR_LIMIT_COUNT:
@@ -119,6 +156,7 @@ class MemcacheRing(object):
             served.append(server)
             if self._error_limited[server] > time.time():
                 continue
+            sock = None
             try:
                 fp, sock = self._client_cache[server].pop()
                 yield server, fp, sock
@@ -136,7 +174,8 @@ class MemcacheRing(object):
                     sock.settimeout(self._io_timeout)
                     yield server, sock.makefile(), sock
                 except Exception, e:
-                    self._exception_occurred(server, e, 'connecting')
+                    self._exception_occurred(
+                        server, e, action='connecting', sock=sock)
 
     def _return_conn(self, server, fp, sock):
         """ Returns a server connection to the pool """
@@ -182,7 +221,7 @@ class MemcacheRing(object):
                 self._return_conn(server, fp, sock)
                 return
             except Exception, e:
-                self._exception_occurred(server, e)
+                self._exception_occurred(server, e, sock=sock, fp=fp)
 
     def get(self, key):
         """
@@ -215,7 +254,7 @@ class MemcacheRing(object):
                 self._return_conn(server, fp, sock)
                 return value
             except Exception, e:
-                self._exception_occurred(server, e)
+                self._exception_occurred(server, e, sock=sock, fp=fp)
 
     def incr(self, key, delta=1, time=0, timeout=0):
         """
@@ -267,7 +306,7 @@ class MemcacheRing(object):
                 self._return_conn(server, fp, sock)
                 return ret
             except Exception, e:
-                self._exception_occurred(server, e)
+                self._exception_occurred(server, e, sock=sock, fp=fp)
         raise MemcacheConnectionError("No Memcached connections succeeded.")
 
     def decr(self, key, delta=1, time=0, timeout=0):
@@ -304,7 +343,7 @@ class MemcacheRing(object):
                 self._return_conn(server, fp, sock)
                 return
             except Exception, e:
-                self._exception_occurred(server, e)
+                self._exception_occurred(server, e, sock=sock, fp=fp)
 
     def set_multi(self, mapping, server_key, serialize=True, timeout=0,
                   time=0, min_compress_len=0):
@@ -352,7 +391,7 @@ class MemcacheRing(object):
                 self._return_conn(server, fp, sock)
                 return
             except Exception, e:
-                self._exception_occurred(server, e)
+                self._exception_occurred(server, e, sock=sock, fp=fp)
 
     def get_multi(self, keys, server_key):
         """
@@ -393,4 +432,4 @@ class MemcacheRing(object):
                 self._return_conn(server, fp, sock)
                 return values
             except Exception, e:
-                self._exception_occurred(server, e)
+                self._exception_occurred(server, e, sock=sock, fp=fp)

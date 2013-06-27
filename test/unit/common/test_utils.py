@@ -19,6 +19,7 @@ from __future__ import with_statement
 from test.unit import temptree
 import ctypes
 import errno
+import eventlet
 import logging
 import os
 import random
@@ -26,9 +27,9 @@ import re
 import socket
 import sys
 from textwrap import dedent
+import threading
 import time
 import unittest
-from threading import Thread
 from Queue import Queue, Empty
 from getpass import getuser
 from shutil import rmtree
@@ -36,7 +37,7 @@ from StringIO import StringIO
 from functools import partial
 from tempfile import TemporaryFile, NamedTemporaryFile
 
-from mock import patch
+from mock import MagicMock, patch
 
 from swift.common.exceptions import (Timeout, MessageTimeout,
                                      ConnectionTimeout)
@@ -528,18 +529,23 @@ class TestUtils(unittest.TestCase):
             self.assert_('my error message' in log_msg)
 
             # test eventlet.Timeout
-            log_exception(ConnectionTimeout(42, 'my error message'))
+            connection_timeout = ConnectionTimeout(42, 'my error message')
+            log_exception(connection_timeout)
             log_msg = strip_value(sio)
             self.assert_('Traceback' not in log_msg)
             self.assert_('ConnectionTimeout' in log_msg)
             self.assert_('(42s)' in log_msg)
             self.assert_('my error message' not in log_msg)
-            log_exception(MessageTimeout(42, 'my error message'))
+            connection_timeout.cancel()
+
+            message_timeout = MessageTimeout(42, 'my error message')
+            log_exception(message_timeout)
             log_msg = strip_value(sio)
             self.assert_('Traceback' not in log_msg)
             self.assert_('MessageTimeout' in log_msg)
             self.assert_('(42s)' in log_msg)
             self.assert_('my error message' in log_msg)
+            message_timeout.cancel()
 
             # test unhandled
             log_exception(Exception('my error message'))
@@ -1308,6 +1314,134 @@ log_name = %(yarr)s'''
         ts = utils.get_trans_id_time('tx1df4ff4f55ea45f7b2ec2-almostright')
         self.assertEquals(ts, None)
 
+    def test_tpool_reraise(self):
+        with patch.object(utils.tpool, 'execute', lambda f: f()):
+            self.assertTrue(
+                utils.tpool_reraise(MagicMock(return_value='test1')), 'test1')
+            self.assertRaises(Exception,
+                utils.tpool_reraise, MagicMock(side_effect=Exception('test2')))
+            self.assertRaises(BaseException,
+                utils.tpool_reraise,
+                MagicMock(side_effect=BaseException('test3')))
+
+
+class TestFileLikeIter(unittest.TestCase):
+
+    def test_iter_file_iter(self):
+        in_iter = ['abc', 'de', 'fghijk', 'l']
+        chunks = []
+        for chunk in utils.FileLikeIter(in_iter):
+            chunks.append(chunk)
+        self.assertEquals(chunks, in_iter)
+
+    def test_next(self):
+        in_iter = ['abc', 'de', 'fghijk', 'l']
+        chunks = []
+        iter_file = utils.FileLikeIter(in_iter)
+        while True:
+            try:
+                chunk = iter_file.next()
+            except StopIteration:
+                break
+            chunks.append(chunk)
+        self.assertEquals(chunks, in_iter)
+
+    def test_read(self):
+        in_iter = ['abc', 'de', 'fghijk', 'l']
+        chunks = []
+        iter_file = utils.FileLikeIter(in_iter)
+        self.assertEquals(iter_file.read(), ''.join(in_iter))
+
+    def test_read_with_size(self):
+        in_iter = ['abc', 'de', 'fghijk', 'l']
+        chunks = []
+        iter_file = utils.FileLikeIter(in_iter)
+        while True:
+            chunk = iter_file.read(2)
+            if not chunk:
+                break
+            self.assertTrue(len(chunk) <= 2)
+            chunks.append(chunk)
+        self.assertEquals(''.join(chunks), ''.join(in_iter))
+
+    def test_read_with_size_zero(self):
+        # makes little sense, but file supports it, so...
+        self.assertEquals(utils.FileLikeIter('abc').read(0), '')
+
+    def test_readline(self):
+        in_iter = ['abc\n', 'd', '\nef', 'g\nh', '\nij\n\nk\n', 'trailing.']
+        lines = []
+        iter_file = utils.FileLikeIter(in_iter)
+        while True:
+            line = iter_file.readline()
+            if not line:
+                break
+            lines.append(line)
+        self.assertEquals(
+            lines,
+            [v if v == 'trailing.' else v + '\n'
+             for v in ''.join(in_iter).split('\n')])
+
+    def test_readline2(self):
+        self.assertEquals(
+            utils.FileLikeIter(['abc', 'def\n']).readline(4),
+            'abcd')
+
+    def test_readline3(self):
+        self.assertEquals(
+            utils.FileLikeIter(['a' * 1111, 'bc\ndef']).readline(),
+            ('a' * 1111) + 'bc\n')
+
+    def test_readline_with_size(self):
+
+        in_iter = ['abc\n', 'd', '\nef', 'g\nh', '\nij\n\nk\n', 'trailing.']
+        lines = []
+        iter_file = utils.FileLikeIter(in_iter)
+        while True:
+            line = iter_file.readline(2)
+            if not line:
+                break
+            lines.append(line)
+        self.assertEquals(
+            lines,
+            ['ab', 'c\n', 'd\n', 'ef', 'g\n', 'h\n', 'ij', '\n', '\n', 'k\n',
+             'tr', 'ai', 'li', 'ng', '.'])
+
+    def test_readlines(self):
+        in_iter = ['abc\n', 'd', '\nef', 'g\nh', '\nij\n\nk\n', 'trailing.']
+        lines = utils.FileLikeIter(in_iter).readlines()
+        self.assertEquals(
+            lines,
+            [v if v == 'trailing.' else v + '\n'
+             for v in ''.join(in_iter).split('\n')])
+
+    def test_readlines_with_size(self):
+        in_iter = ['abc\n', 'd', '\nef', 'g\nh', '\nij\n\nk\n', 'trailing.']
+        iter_file = utils.FileLikeIter(in_iter)
+        lists_of_lines = []
+        while True:
+            lines = iter_file.readlines(2)
+            if not lines:
+                break
+            lists_of_lines.append(lines)
+        self.assertEquals(
+            lists_of_lines,
+            [['ab'], ['c\n'], ['d\n'], ['ef'], ['g\n'], ['h\n'], ['ij'],
+             ['\n', '\n'], ['k\n'], ['tr'], ['ai'], ['li'], ['ng'], ['.']])
+
+    def test_close(self):
+        iter_file = utils.FileLikeIter('abcdef')
+        self.assertEquals(iter_file.next(), 'a')
+        iter_file.close()
+        self.assertTrue(iter_file.closed, True)
+        self.assertRaises(ValueError, iter_file.next)
+        self.assertRaises(ValueError, iter_file.read)
+        self.assertRaises(ValueError, iter_file.readline)
+        self.assertRaises(ValueError, iter_file.readlines)
+        # Just make sure repeated close calls don't raise an Exception
+        iter_file.close()
+        self.assertTrue(iter_file.closed, True)
+
 
 class TestStatsdLogging(unittest.TestCase):
     def test_get_logger_statsd_client_not_specified(self):
@@ -1449,13 +1583,168 @@ class TestStatsdLogging(unittest.TestCase):
         self.assert_(mock_controller.args[1] > 0)
 
 
+class UnsafeXrange(object):
+    """
+    Like xrange(limit), but with extra context switching to screw things up.
+    """
+    def __init__(self, upper_bound):
+        self.current = 0
+        self.concurrent_calls = 0
+        self.upper_bound = upper_bound
+
+    def __iter__(self):
+        return self
+
+    def next(self):
+        if self.concurrent_calls > 0:
+            raise ValueError("concurrent access is bad, mmmkay? (%r)")
+
+        self.concurrent_calls += 1
+        try:
+            if self.current >= self.upper_bound:
+                raise StopIteration
+            else:
+                val = self.current
+                self.current += 1
+                eventlet.sleep()   # yield control
+                return val
+        finally:
+            self.concurrent_calls -= 1
+
+
+class TestAffinityKeyFunction(unittest.TestCase):
+    def setUp(self):
+        self.nodes = [dict(id=0, region=1, zone=1),
+                      dict(id=1, region=1, zone=2),
+                      dict(id=2, region=2, zone=1),
+                      dict(id=3, region=2, zone=2),
+                      dict(id=4, region=3, zone=1),
+                      dict(id=5, region=3, zone=2),
+                      dict(id=6, region=4, zone=0),
+                      dict(id=7, region=4, zone=1)]
+
+    def test_single_region(self):
+        keyfn = utils.affinity_key_function("r3=1")
+        ids = [n['id'] for n in sorted(self.nodes, key=keyfn)]
+        self.assertEqual([4, 5, 0, 1, 2, 3, 6, 7], ids)
+
+    def test_bogus_value(self):
+        self.assertRaises(ValueError,
+                          utils.affinity_key_function, "r3")
+        self.assertRaises(ValueError,
+                          utils.affinity_key_function, "r3=elephant")
+
+    def test_empty_value(self):
+        # Empty's okay, it just means no preference
+        keyfn = utils.affinity_key_function("")
+        self.assert_(callable(keyfn))
+        ids = [n['id'] for n in sorted(self.nodes, key=keyfn)]
+        self.assertEqual([0, 1, 2, 3, 4, 5, 6, 7], ids)
+
+    def test_all_whitespace_value(self):
+        # Empty's okay, it just means no preference
+        keyfn = utils.affinity_key_function("  \n")
+        self.assert_(callable(keyfn))
+        ids = [n['id'] for n in sorted(self.nodes, key=keyfn)]
+        self.assertEqual([0, 1, 2, 3, 4, 5, 6, 7], ids)
+
+    def test_with_zone_zero(self):
+        keyfn = utils.affinity_key_function("r4z0=1")
+        ids = [n['id'] for n in sorted(self.nodes, key=keyfn)]
+        self.assertEqual([6, 0, 1, 2, 3, 4, 5, 7], ids)
+
+    def test_multiple(self):
+        keyfn = utils.affinity_key_function("r1=100, r4=200, r3z1=1")
+        ids = [n['id'] for n in sorted(self.nodes, key=keyfn)]
+        self.assertEqual([4, 0, 1, 6, 7, 2, 3, 5], ids)
+
+    def test_more_specific_after_less_specific(self):
+        keyfn = utils.affinity_key_function("r2=100, r2z2=50")
+        ids = [n['id'] for n in sorted(self.nodes, key=keyfn)]
+        self.assertEqual([3, 2, 0, 1, 4, 5, 6, 7], ids)
+
+
+class TestAffinityLocalityPredicate(unittest.TestCase):
+    def setUp(self):
+        self.nodes = [dict(id=0, region=1, zone=1),
+                      dict(id=1, region=1, zone=2),
+                      dict(id=2, region=2, zone=1),
+                      dict(id=3, region=2, zone=2),
+                      dict(id=4, region=3, zone=1),
+                      dict(id=5, region=3, zone=2),
+                      dict(id=6, region=4, zone=0),
+                      dict(id=7, region=4, zone=1)]
+
+    def test_empty(self):
+        pred = utils.affinity_locality_predicate('')
+        self.assert_(pred is None)
+
+    def test_region(self):
+        pred = utils.affinity_locality_predicate('r1')
+        self.assert_(callable(pred))
+        ids = [n['id'] for n in self.nodes if pred(n)]
+        self.assertEqual([0, 1], ids)
+
+    def test_zone(self):
+        pred = utils.affinity_locality_predicate('r1z1')
+        self.assert_(callable(pred))
+        ids = [n['id'] for n in self.nodes if pred(n)]
+        self.assertEqual([0], ids)
+
+    def test_multiple(self):
+        pred = utils.affinity_locality_predicate('r1, r3, r4z0')
+        self.assert_(callable(pred))
+        ids = [n['id'] for n in self.nodes if pred(n)]
+        self.assertEqual([0, 1, 4, 5, 6], ids)
+
+    def test_invalid(self):
+        self.assertRaises(ValueError,
+                          utils.affinity_locality_predicate, 'falafel')
+        self.assertRaises(ValueError,
+                          utils.affinity_locality_predicate, 'r8zQ')
+        self.assertRaises(ValueError,
+                          utils.affinity_locality_predicate, 'r2d2')
+        self.assertRaises(ValueError,
+                          utils.affinity_locality_predicate, 'r1z1=1')
+
+class TestGreenthreadSafeIterator(unittest.TestCase):
+    def increment(self, iterable):
+        plus_ones = []
+        for n in iterable:
+            plus_ones.append(n + 1)
+        return plus_ones
+
+    def test_setup_works(self):
+        # it should work without concurrent access
+        self.assertEquals([0, 1, 2, 3], list(UnsafeXrange(4)))
+
+        iterable = UnsafeXrange(10)
+        pile = eventlet.GreenPile(2)
+        for _ in xrange(2):
+            pile.spawn(self.increment, iterable)
+
+        try:
+            response = sorted([resp for resp in pile])
+            self.assertTrue(False, "test setup is insufficiently crazy")
+        except ValueError:
+            pass
+
+    def test_access_is_serialized(self):
+        pile = eventlet.GreenPile(2)
+        iterable = utils.GreenthreadSafeIterator(UnsafeXrange(10))
+        for _ in xrange(2):
+            pile.spawn(self.increment, iterable)
+        response = sorted(sum([resp for resp in pile], []))
+        self.assertEquals(range(1, 11), response)
+
+
 class TestStatsdLoggingDelegation(unittest.TestCase):
     def setUp(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(('localhost', 0))
         self.port = self.sock.getsockname()[1]
         self.queue = Queue()
-        self.reader_thread = Thread(target=self.statsd_reader)
+        self.reader_thread = threading.Thread(target=self.statsd_reader)
         self.reader_thread.setDaemon(1)
         self.reader_thread.start()
 
@@ -1737,6 +2026,92 @@ class TestStatsdLoggingDelegation(unittest.TestCase):
             with patch('os.fsync', fsync):
                 utils.fsync(12345)
                 self.assertEquals(called, [12345])
+
+
+class TestThreadpool(unittest.TestCase):
+
+    def _thread_id(self):
+        return threading.current_thread().ident
+
+    def _capture_args(self, *args, **kwargs):
+        return {'args': args, 'kwargs': kwargs}
+
+    def _raise_valueerror(self):
+        return int('fishcakes')
+
+    def test_run_in_thread_with_threads(self):
+        tp = utils.ThreadPool(1)
+
+        my_id = self._thread_id()
+        other_id = tp.run_in_thread(self._thread_id)
+        self.assertNotEquals(my_id, other_id)
+
+        result = tp.run_in_thread(self._capture_args, 1, 2, bert='ernie')
+        self.assertEquals(result, {'args': (1, 2),
+                                   'kwargs': {'bert': 'ernie'}})
+
+        caught = False
+        try:
+            tp.run_in_thread(self._raise_valueerror)
+        except ValueError:
+            caught = True
+        self.assertTrue(caught)
+
+    def test_force_run_in_thread_with_threads(self):
+        # with nthreads > 0, force_run_in_thread looks just like run_in_thread
+        tp = utils.ThreadPool(1)
+
+        my_id = self._thread_id()
+        other_id = tp.force_run_in_thread(self._thread_id)
+        self.assertNotEquals(my_id, other_id)
+
+        result = tp.force_run_in_thread(self._capture_args, 1, 2, bert='ernie')
+        self.assertEquals(result, {'args': (1, 2),
+                                   'kwargs': {'bert': 'ernie'}})
+
+        caught = False
+        try:
+            tp.force_run_in_thread(self._raise_valueerror)
+        except ValueError:
+            caught = True
+        self.assertTrue(caught)
+
+    def test_run_in_thread_without_threads(self):
+        # with zero threads, run_in_thread doesn't actually do so
+        tp = utils.ThreadPool(0)
+
+        my_id = self._thread_id()
+        other_id = tp.run_in_thread(self._thread_id)
+        self.assertEquals(my_id, other_id)
+
+        result = tp.run_in_thread(self._capture_args, 1, 2, bert='ernie')
+        self.assertEquals(result, {'args': (1, 2),
+                                   'kwargs': {'bert': 'ernie'}})
+
+        caught = False
+        try:
+            tp.run_in_thread(self._raise_valueerror)
+        except ValueError:
+            caught = True
+        self.assertTrue(caught)
+
+    def test_force_run_in_thread_without_threads(self):
+        # with zero threads, force_run_in_thread uses eventlet.tpool
+        tp = utils.ThreadPool(0)
+
+        my_id = self._thread_id()
+        other_id = tp.force_run_in_thread(self._thread_id)
+        self.assertNotEquals(my_id, other_id)
+
+        result = tp.force_run_in_thread(self._capture_args, 1, 2, bert='ernie')
+        self.assertEquals(result, {'args': (1, 2),
+                                   'kwargs': {'bert': 'ernie'}})
+        caught = False
+        try:
+            tp.force_run_in_thread(self._raise_valueerror)
+        except ValueError:
+            caught = True
+        self.assertTrue(caught)
 
 
 if __name__ == '__main__':

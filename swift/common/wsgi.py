@@ -190,6 +190,12 @@ class RestrictedGreenPool(GreenPool):
 
 
 def run_server(conf, logger, sock):
+    # Ensure TZ environment variable exists to avoid stat('/etc/localtime') on
+    # some platforms. This locks in reported times to the timezone in which
+    # the server first starts running in locations that periodically change
+    # timezones.
+    os.environ['TZ'] = time.strftime("%z", time.gmtime())
+
     wsgi.HttpProtocol.default_request_version = "HTTP/1.0"
     # Turn off logging requests by the underlying WSGI software.
     wsgi.HttpProtocol.log_request = lambda *a: None
@@ -228,8 +234,8 @@ def run_wsgi(conf_path, app_section, *args, **kwargs):
     """
     # Load configuration, Set logger and Load request processor
     try:
-        (app, conf, logger, log_name) = \
-            init_request_processor(conf_path, app_section, *args, **kwargs)
+        (conf, logger, log_name) = \
+            _initrp(conf_path, app_section, *args, **kwargs)
     except ConfigFileError, e:
         print e
         return
@@ -238,6 +244,10 @@ def run_wsgi(conf_path, app_section, *args, **kwargs):
     sock = get_socket(conf, default_port=kwargs.get('default_port', 8080))
     # remaining tasks should not require elevated privileges
     drop_privileges(conf.get('user', 'swift'))
+
+    # Ensure the application can be loaded before proceeding.
+    loadapp(conf_path, global_conf={'log_name': log_name})
+
     # set utils.FALLOCATE_RESERVE if desired
     reserve = int(conf.get('fallocate_reserve', 0))
     if reserve > 0:
@@ -300,17 +310,7 @@ class ConfigFileError(Exception):
     pass
 
 
-def init_request_processor(conf_path, app_section, *args, **kwargs):
-    """
-    Loads common settings from conf
-    Sets the logger
-    Loads the request processor
-
-    :param conf_path: Path to paste.deploy style configuration file/directory
-    :param app_section: App name from conf file to load config from
-    :returns: the loaded application entry point
-    :raises ConfigFileError: Exception is raised for config file error
-    """
+def _initrp(conf_path, app_section, *args, **kwargs):
     try:
         conf = appconfig(conf_path, name=app_section)
     except Exception, e:
@@ -333,6 +333,21 @@ def init_request_processor(conf_path, app_section, *args, **kwargs):
         disable_fallocate()
 
     monkey_patch_mimetools()
+    return (conf, logger, log_name)
+
+
+def init_request_processor(conf_path, app_section, *args, **kwargs):
+    """
+    Loads common settings from conf
+    Sets the logger
+    Loads the request processor
+
+    :param conf_path: Path to paste.deploy style configuration file/directory
+    :param app_section: App name from conf file to load config from
+    :returns: the loaded application entry point
+    :raises ConfigFileError: Exception is raised for config file error
+    """
+    (conf, logger, log_name) = _initrp(conf_path, app_section, *args, **kwargs)
     app = loadapp(conf_path, global_conf={'log_name': log_name})
     return (app, conf, logger, log_name)
 

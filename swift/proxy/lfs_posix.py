@@ -192,10 +192,10 @@ class LFSPluginPosix():
         print >>fp, "posix initialize path", self.datadir, "ts", timestamp
         fp.close()
         os.makedirs(self.datadir)
-        #xattr.setattr(self.datadir, STATUS_KEY, 'OK')
+        #xattr.setxattr(self.datadir, STATUS_KEY, 'OK')
         # Keeping stats counts in EA must be ridiculously inefficient. XXX
         if self._type == 2:
-            xattr.setattr(self.datadir, CONTCNT_KEY, str(0))
+            xattr.setxattr(self.datadir, CONTCNT_KEY, str(0))
             write_metadata(self.datadir, self.metadata)
         elif self._type == 1:
             write_metadata(self.datadir, self.metadata)
@@ -207,14 +207,14 @@ class LFSPluginPosix():
     # All the status machinery is not intended in p-broker. Maybe never.
     #def is_status_deleted(self):
     #    # underlying account is marked as deleted
-    #    status = xattr.getattr(self.datadir, STATUS_KEY)
+    #    status = xattr.getxattr(self.datadir, STATUS_KEY)
     #    return status == 'DELETED'
 
     def get_info(self):
         name = os.path.basename(self.datadir)
         st = os.stat(self.datadir)
         if self._type == 2:
-            cont_cnt_str = xattr.getattr(self.datadir, CONTCNT_KEY)
+            cont_cnt_str = xattr.getxattr(self.datadir, CONTCNT_KEY)
             try:
                 container_count = int(cont_cnt_str)
             except ValueError:
@@ -330,7 +330,7 @@ class LFSPluginPosix():
         #  -- look what Gluster people do and copy that, you wheel reinventor
         # XXX Don't forget locking or transactions.
 
-        #cont_cnt_str = xattr.getattr(self.datadir, CONTCNT_KEY)
+        #cont_cnt_str = xattr.getxattr(self.datadir, CONTCNT_KEY)
         #try:
         #    container_count = int(cont_cnt_str)
         #except ValueError:

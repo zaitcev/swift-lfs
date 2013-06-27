@@ -13,13 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import mock
 import operator
 import os
 import unittest
 import cPickle as pickle
 from collections import defaultdict
 from shutil import rmtree
-from mock import Mock, call as mock_call
 
 from swift.common import exceptions
 from swift.common import ring
@@ -124,17 +124,20 @@ class TestRingBuilder(unittest.TestCase):
         rb = ring.RingBuilder(8, 3, 1)
         dev = {'id': 0, 'region': 0, 'zone': 0, 'weight': 1,
                'ip': '127.0.0.1', 'port': 10000}
-        rb.add_dev(dev)
+        dev_id = rb.add_dev(dev)
         self.assertRaises(exceptions.DuplicateDeviceError, rb.add_dev, dev)
+        self.assertEqual(dev_id, 0)
         rb = ring.RingBuilder(8, 3, 1)
         #test add new dev with no id
-        rb.add_dev({'zone': 0, 'region': 1, 'weight': 1,
-                    'ip': '127.0.0.1', 'port': 6000})
+        dev_id = rb.add_dev({'zone': 0, 'region': 1, 'weight': 1,
+                             'ip': '127.0.0.1', 'port': 6000})
         self.assertEquals(rb.devs[0]['id'], 0)
+        self.assertEqual(dev_id, 0)
         #test add another dev with no id
-        rb.add_dev({'zone': 3, 'region': 2, 'weight': 1,
-                    'ip': '127.0.0.1', 'port': 6000})
+        dev_id = rb.add_dev({'zone': 3, 'region': 2, 'weight': 1,
+                             'ip': '127.0.0.1', 'port': 6000})
         self.assertEquals(rb.devs[1]['id'], 1)
+        self.assertEqual(dev_id, 1)
 
     def test_set_dev_weight(self):
         rb = ring.RingBuilder(8, 3, 1)
@@ -666,12 +669,12 @@ class TestRingBuilder(unittest.TestCase):
         real_pickle = pickle.load
         try:
             #test a legit builder
-            fake_pickle = Mock(return_value=rb)
-            fake_open = Mock(return_value=None)
+            fake_pickle = mock.Mock(return_value=rb)
+            fake_open = mock.Mock(return_value=None)
             pickle.load = fake_pickle
             builder = ring.RingBuilder.load('fake.builder', open=fake_open)
             self.assertEquals(fake_pickle.call_count, 1)
-            fake_open.assert_has_calls([mock_call('fake.builder', 'rb')])
+            fake_open.assert_has_calls([mock.call('fake.builder', 'rb')])
             self.assertEquals(builder, rb)
             fake_pickle.reset_mock()
             fake_open.reset_mock()
@@ -680,7 +683,7 @@ class TestRingBuilder(unittest.TestCase):
             fake_pickle.return_value = rb.to_dict()
             pickle.load = fake_pickle
             builder = ring.RingBuilder.load('fake.builder', open=fake_open)
-            fake_open.assert_has_calls([mock_call('fake.builder', 'rb')])
+            fake_open.assert_has_calls([mock.call('fake.builder', 'rb')])
             self.assertEquals(builder.devs, rb.devs)
             fake_pickle.reset_mock()
             fake_open.reset_mock()
@@ -692,11 +695,62 @@ class TestRingBuilder(unittest.TestCase):
             fake_pickle.return_value = no_meta_builder
             pickle.load = fake_pickle
             builder = ring.RingBuilder.load('fake.builder', open=fake_open)
-            fake_open.assert_has_calls([mock_call('fake.builder', 'rb')])
+            fake_open.assert_has_calls([mock.call('fake.builder', 'rb')])
             self.assertEquals(builder.devs, rb.devs)
             fake_pickle.reset_mock()
         finally:
             pickle.load = real_pickle
+
+    def test_save_load(self):
+        rb = ring.RingBuilder(8, 3, 1)
+        devs = [{'id': 0, 'region': 0, 'zone': 0, 'weight': 1,
+                 'ip': '127.0.0.0', 'port': 10000,
+                 'replication_ip': '127.0.0.0', 'replication_port': 10000,
+                 'device': 'sda1', 'meta': 'meta0'},
+                {'id': 1, 'region': 0, 'zone': 1, 'weight': 1,
+                 'ip': '127.0.0.1', 'port': 10001,
+                 'replication_ip': '127.0.0.1', 'replication_port': 10001,
+                 'device': 'sdb1', 'meta': 'meta1'},
+                {'id': 2, 'region': 0, 'zone': 2, 'weight': 2,
+                 'ip': '127.0.0.2', 'port': 10002,
+                 'replication_ip': '127.0.0.2', 'replication_port': 10002,
+                 'device': 'sdc1', 'meta': 'meta2'},
+                {'id': 3, 'region': 0, 'zone': 3, 'weight': 2,
+                 'ip': '127.0.0.3', 'port': 10003,
+                 'replication_ip': '127.0.0.3', 'replication_port': 10003,
+                 'device': 'sdd1', 'meta': ''}]
+        for d in devs:
+            rb.add_dev(d)
+        rb.rebalance()
+        builder_file = os.path.join(self.testdir, 'test_save.builder')
+        rb.save(builder_file)
+        loaded_rb = ring.RingBuilder.load(builder_file)
+        self.maxDiff = None
+        self.assertEquals(loaded_rb.to_dict(), rb.to_dict())
+
+    @mock.patch('__builtin__.open', autospec=True)
+    @mock.patch('swift.common.ring.builder.pickle.dump', autospec=True)
+    def test_save(self, mock_pickle_dump, mock_open):
+        mock_open.return_value = mock_fh = mock.Mock()
+        rb = ring.RingBuilder(8, 3, 1)
+        devs = [{'id': 0, 'region': 0, 'zone': 0, 'weight': 1,
+                 'ip': '127.0.0.0', 'port': 10000, 'device': 'sda1',
+                 'meta': 'meta0'},
+                {'id': 1, 'region': 0, 'zone': 1, 'weight': 1,
+                 'ip': '127.0.0.1', 'port': 10001, 'device': 'sdb1',
+                 'meta': 'meta1'},
+                {'id': 2, 'region': 0, 'zone': 2, 'weight': 2,
+                 'ip': '127.0.0.2', 'port': 10002, 'device': 'sdc1',
+                 'meta': 'meta2'},
+                {'id': 3, 'region': 0, 'zone': 3, 'weight': 2,
+                 'ip': '127.0.0.3', 'port': 10003, 'device': 'sdd1'}]
+        for d in devs:
+            rb.add_dev(d)
+        rb.rebalance()
+        rb.save('some.builder')
+        mock_open.assert_called_once_with('some.builder', 'wb')
+        mock_pickle_dump.assert_called_once_with(rb.to_dict(), mock_fh,
+                                                 protocol=2)
 
     def test_search_devs(self):
         rb = ring.RingBuilder(8, 3, 1)
@@ -710,31 +764,50 @@ class TestRingBuilder(unittest.TestCase):
                  'ip': '127.0.0.2', 'port': 10002, 'device': 'sdc1',
                  'meta': 'meta2'},
                 {'id': 3, 'region': 1, 'zone': 3, 'weight': 2,
-                 'ip': '127.0.0.3', 'port': 10003, 'device': 'sdffd1',
-                 'meta': 'meta3'}]
+                 'ip': '127.0.0.3', 'port': 10003, 'device': 'sdd1',
+                 'meta': 'meta3'},
+                {'id': 4, 'region': 2, 'zone': 4, 'weight': 1,
+                 'ip': '127.0.0.4', 'port': 10004, 'device': 'sde1',
+                 'meta': 'meta4', 'replication_ip': '127.0.0.10',
+                 'replication_port': 20000},
+                {'id': 5, 'region': 2, 'zone': 5, 'weight': 2,
+                 'ip': '127.0.0.5', 'port': 10005, 'device': 'sdf1',
+                 'meta': 'meta5', 'replication_ip': '127.0.0.11',
+                 'replication_port': 20001},
+                {'id': 6, 'region': 2, 'zone': 6, 'weight': 2,
+                 'ip': '127.0.0.6', 'port': 10006, 'device': 'sdg1',
+                 'meta': 'meta6', 'replication_ip': '127.0.0.12',
+                 'replication_port': 20002}]
         for d in devs:
             rb.add_dev(d)
         rb.rebalance()
-        res = rb.search_devs('r0')
+        res = rb.search_devs({'region': 0})
         self.assertEquals(res, [devs[0], devs[1]])
-        res = rb.search_devs('r1')
+        res = rb.search_devs({'region': 1})
         self.assertEquals(res, [devs[2], devs[3]])
-        res = rb.search_devs('r1z2')
+        res = rb.search_devs({'region': 1, 'zone': 2})
         self.assertEquals(res, [devs[2]])
-        res = rb.search_devs('d1')
+        res = rb.search_devs({'id': 1})
         self.assertEquals(res, [devs[1]])
-        res = rb.search_devs('z1')
+        res = rb.search_devs({'zone': 1})
         self.assertEquals(res, [devs[1]])
-        res = rb.search_devs('-127.0.0.1')
+        res = rb.search_devs({'ip': '127.0.0.1'})
         self.assertEquals(res, [devs[1]])
-        res = rb.search_devs('-[127.0.0.1]:10001')
+        res = rb.search_devs({'ip': '127.0.0.1', 'port': 10001})
         self.assertEquals(res, [devs[1]])
-        res = rb.search_devs(':10001')
+        res = rb.search_devs({'port': 10001})
         self.assertEquals(res, [devs[1]])
-        res = rb.search_devs('/sdb1')
+        res = rb.search_devs({'replication_ip': '127.0.0.10'})
+        self.assertEquals(res, [devs[4]])
+        res = rb.search_devs({'replication_ip': '127.0.0.10',
+                              'replication_port': 20000})
+        self.assertEquals(res, [devs[4]])
+        res = rb.search_devs({'replication_port': 20000})
+        self.assertEquals(res, [devs[4]])
+        res = rb.search_devs({'device': 'sdb1'})
         self.assertEquals(res, [devs[1]])
-        res = rb.search_devs('_meta1')
-        self.assertRaises(ValueError, rb.search_devs, 'OMGPONIES')
+        res = rb.search_devs({'meta': 'meta1'})
+        self.assertEquals(res, [devs[1]])
 
     def test_validate(self):
         rb = ring.RingBuilder(8, 3, 1)
@@ -746,6 +819,10 @@ class TestRingBuilder(unittest.TestCase):
                     'ip': '127.0.0.1', 'port': 10002, 'device': 'sda1'})
         rb.add_dev({'id': 3, 'region': 0, 'zone': 3, 'weight': 2,
                     'ip': '127.0.0.1', 'port': 10003, 'device': 'sda1'})
+
+        # Degenerate case: devices added but not rebalanced yet
+        self.assertRaises(exceptions.RingValidationError, rb.validate)
+
         rb.rebalance()
         r = rb.get_ring()
         counts = {}

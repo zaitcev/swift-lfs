@@ -37,7 +37,7 @@ from swift.common.http import HTTP_NOT_FOUND, is_success
 from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPConflict, \
     HTTPCreated, HTTPInternalServerError, HTTPNoContent, HTTPNotFound, \
     HTTPPreconditionFailed, HTTPMethodNotAllowed, Request, Response, \
-    HTTPInsufficientStorage, HTTPNotAcceptable
+    HTTPInsufficientStorage, HTTPNotAcceptable, HeaderKeyDict
 
 DATADIR = 'containers'
 
@@ -55,6 +55,18 @@ class ContainerController(object):
         self.mount_check = config_true_value(conf.get('mount_check', 'true'))
         self.node_timeout = int(conf.get('node_timeout', 3))
         self.conn_timeout = float(conf.get('conn_timeout', 0.5))
+        replication_server = conf.get('replication_server', None)
+        if replication_server is None:
+            allowed_methods = ['DELETE', 'PUT', 'HEAD', 'GET', 'REPLICATE',
+                               'POST']
+        else:
+            replication_server = config_true_value(replication_server)
+            if replication_server:
+                allowed_methods = ['REPLICATE']
+            else:
+                allowed_methods = ['DELETE', 'PUT', 'HEAD', 'GET', 'POST']
+        self.replication_server = replication_server
+        self.allowed_methods = allowed_methods
         self.allowed_sync_hosts = [
             h.strip()
             for h in conf.get('allowed_sync_hosts', '127.0.0.1').split(',')
@@ -126,12 +138,14 @@ class ContainerController(object):
             account_ip, account_port = account_host.rsplit(':', 1)
             new_path = '/' + '/'.join([account, container])
             info = broker.get_info()
-            account_headers = {
+            account_headers = HeaderKeyDict({
                 'x-put-timestamp': info['put_timestamp'],
                 'x-delete-timestamp': info['delete_timestamp'],
                 'x-object-count': info['object_count'],
                 'x-bytes-used': info['bytes_used'],
-                'x-trans-id': req.headers.get('x-trans-id', '-')}
+                'x-trans-id': req.headers.get('x-trans-id', '-'),
+                'user-agent': 'container-server %s' % os.getpid(),
+                'referer': req.as_referer()})
             if req.headers.get('x-account-override-deleted', 'no').lower() == \
                     'yes':
                 account_headers['x-account-override-deleted'] = 'yes'
@@ -184,8 +198,11 @@ class ContainerController(object):
         broker = self._get_container_broker(drive, part, account, container)
         if account.startswith(self.auto_create_account_prefix) and obj and \
                 not os.path.exists(broker.db_file):
-            broker.initialize(normalize_timestamp(
-                req.headers.get('x-timestamp') or time.time()))
+            try:
+                broker.initialize(normalize_timestamp(
+                    req.headers.get('x-timestamp') or time.time()))
+            except swift.common.db.DatabaseAlreadyExists:
+                pass
         if not os.path.exists(broker.db_file):
             return HTTPNotFound()
         if obj:     # delete object
@@ -233,7 +250,10 @@ class ContainerController(object):
         if obj:     # put container object
             if account.startswith(self.auto_create_account_prefix) and \
                     not os.path.exists(broker.db_file):
-                broker.initialize(timestamp)
+                try:
+                    broker.initialize(timestamp)
+                except swift.common.db.DatabaseAlreadyExists:
+                    pass
             if not os.path.exists(broker.db_file):
                 return HTTPNotFound()
             broker.put_object(obj, timestamp, int(req.headers['x-size']),
@@ -242,8 +262,11 @@ class ContainerController(object):
             return HTTPCreated(request=req)
         else:   # put container
             if not os.path.exists(broker.db_file):
-                broker.initialize(timestamp)
-                created = True
+                try:
+                    broker.initialize(timestamp)
+                    created = True
+                except swift.common.db.DatabaseAlreadyExists:
+                    pass
             else:
                 created = broker.is_deleted()
                 broker.update_put_timestamp(timestamp)
@@ -280,6 +303,18 @@ class ContainerController(object):
         except ValueError, err:
             return HTTPBadRequest(body=str(err), content_type='text/plain',
                                   request=req)
+        try:
+            query_format = get_param(req, 'format')
+        except UnicodeDecodeError:
+            return HTTPBadRequest(body='parameters not utf8',
+                                  content_type='text/plain', request=req)
+        if query_format:
+            req.accept = FORMAT2CONTENT_TYPE.get(
+                query_format.lower(), FORMAT2CONTENT_TYPE['plain'])
+        out_content_type = req.accept.best_match(
+            ['text/plain', 'application/json', 'application/xml', 'text/xml'])
+        if not out_content_type:
+            return HTTPNotAcceptable(request=req)
         if self.mount_check and not check_mount(self.root, drive):
             return HTTPInsufficientStorage(drive=drive, request=req)
         broker = self._get_container_broker(drive, part, account, container)
@@ -299,13 +334,7 @@ class ContainerController(object):
             for key, (value, timestamp) in broker.metadata.iteritems()
             if value != '' and (key.lower() in self.save_headers or
                                 key.lower().startswith('x-container-meta-')))
-        if get_param(req, 'format'):
-            req.accept = FORMAT2CONTENT_TYPE.get(
-                get_param(req, 'format').lower(), FORMAT2CONTENT_TYPE['plain'])
-        headers['Content-Type'] = req.accept.best_match(
-            ['text/plain', 'application/json', 'application/xml', 'text/xml'])
-        if not headers['Content-Type']:
-            return HTTPNotAcceptable(request=req)
+        headers['Content-Type'] = out_content_type
         return HTTPNoContent(request=req, headers=headers, charset='utf-8')
 
     def derive_content_type_metadata(self, content_type, size):
@@ -338,25 +367,6 @@ class ContainerController(object):
         except ValueError, err:
             return HTTPBadRequest(body=str(err), content_type='text/plain',
                                   request=req)
-        if self.mount_check and not check_mount(self.root, drive):
-            return HTTPInsufficientStorage(drive=drive, request=req)
-        broker = self._get_container_broker(drive, part, account, container)
-        broker.pending_timeout = 0.1
-        broker.stale_reads_ok = True
-        if broker.is_deleted():
-            return HTTPNotFound(request=req)
-        info = broker.get_info()
-        resp_headers = {
-            'X-Container-Object-Count': info['object_count'],
-            'X-Container-Bytes-Used': info['bytes_used'],
-            'X-Timestamp': info['created_at'],
-            'X-PUT-Timestamp': info['put_timestamp'],
-        }
-        resp_headers.update(
-            (key, value)
-            for key, (value, timestamp) in broker.metadata.iteritems()
-            if value != '' and (key.lower() in self.save_headers or
-                                key.lower().startswith('x-container-meta-')))
         try:
             path = get_param(req, 'path')
             prefix = get_param(req, 'prefix')
@@ -385,6 +395,25 @@ class ContainerController(object):
             ['text/plain', 'application/json', 'application/xml', 'text/xml'])
         if not out_content_type:
             return HTTPNotAcceptable(request=req)
+        if self.mount_check and not check_mount(self.root, drive):
+            return HTTPInsufficientStorage(drive=drive, request=req)
+        broker = self._get_container_broker(drive, part, account, container)
+        broker.pending_timeout = 0.1
+        broker.stale_reads_ok = True
+        if broker.is_deleted():
+            return HTTPNotFound(request=req)
+        info = broker.get_info()
+        resp_headers = {
+            'X-Container-Object-Count': info['object_count'],
+            'X-Container-Bytes-Used': info['bytes_used'],
+            'X-Timestamp': info['created_at'],
+            'X-PUT-Timestamp': info['put_timestamp'],
+        }
+        resp_headers.update(
+            (key, value)
+            for key, (value, timestamp) in broker.metadata.iteritems()
+            if value != '' and (key.lower() in self.save_headers or
+                                key.lower().startswith('x-container-meta-')))
         container_list = broker.list_objects_iter(limit, marker, end_marker,
                                                   prefix, delimiter, path)
         if out_content_type == 'application/json':
@@ -407,16 +436,15 @@ class ContainerController(object):
         elif out_content_type.endswith('/xml'):
             xml_output = []
             for (name, created_at, size, content_type, etag) in container_list:
-                # escape name and format date here
-                name = saxutils.escape(name)
                 created_at = datetime.utcfromtimestamp(
                     float(created_at)).isoformat()
                 # python isoformat() doesn't include msecs when zero
                 if len(created_at) < len("1970-01-01T00:00:00.000000"):
                     created_at += ".000000"
                 if content_type is None:
-                    xml_output.append('<subdir name="%s"><name>%s</name>'
-                                      '</subdir>' % (name, name))
+                    xml_output.append(
+                        '<subdir name=%s><name>%s</name></subdir>' %
+                        (saxutils.quoteattr(name), saxutils.escape(name)))
                 else:
                     content_type, size = self.derive_content_type_metadata(
                         content_type, size)
@@ -425,7 +453,8 @@ class ContainerController(object):
                         '<object><name>%s</name><hash>%s</hash>'
                         '<bytes>%d</bytes><content_type>%s</content_type>'
                         '<last_modified>%s</last_modified></object>' %
-                        (name, etag, size, content_type, created_at))
+                        (saxutils.escape(name), etag, size, content_type,
+                         created_at))
             container_list = ''.join([
                 '<?xml version="1.0" encoding="UTF-8"?>\n',
                 '<container name=%s>' % saxutils.quoteattr(container),
@@ -513,6 +542,8 @@ class ContainerController(object):
                 try:
                     method = getattr(self, req.method)
                     getattr(method, 'publicly_accessible')
+                    if req.method not in self.allowed_methods:
+                        raise AttributeError('Not allowed method.')
                 except AttributeError:
                     res = HTTPMethodNotAllowed()
                 else:

@@ -20,6 +20,7 @@ from unittest import main, TestCase
 from uuid import uuid4
 
 from eventlet import GreenPool, Timeout
+import eventlet
 from sqlite3 import connect
 from swiftclient import client
 
@@ -28,6 +29,7 @@ from swift.common.utils import hash_path, readconf
 from test.probe.common import get_to_final_state, kill_nonprimary_server, \
     kill_server, kill_servers, reset_environment, start_server
 
+eventlet.monkey_patch(all=False, socket=True)
 
 def get_db_file_path(obj_dir):
     files = sorted(listdir(obj_dir), reverse=True)
@@ -41,7 +43,7 @@ class TestContainerFailures(TestCase):
     def setUp(self):
         (self.pids, self.port2server, self.account_ring, self.container_ring,
          self.object_ring, self.url, self.token,
-         self.account) = reset_environment()
+         self.account, self.configs) = reset_environment()
 
     def tearDown(self):
         kill_servers(self.port2server, self.pids)
@@ -120,8 +122,7 @@ class TestContainerFailures(TestCase):
             node_id = (onode['port'] - 6000) / 10
             device = onode['device']
             hash_str = hash_path(self.account, container)
-            server_conf = readconf('/etc/swift/container-server/%s.conf' %
-                                   node_id)
+            server_conf = readconf(self.configs['container'] % node_id)
             devices = server_conf['app:container-server']['devices']
             obj_dir = '%s/%s/containers/%s/%s/%s/' % (devices,
                                                       device, opart,

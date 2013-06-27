@@ -18,7 +18,7 @@ import errno
 import random
 from hashlib import md5
 from contextlib import contextmanager
-from swift.common.utils import normalize_timestamp, renamer
+from swift.common.utils import normalize_timestamp, renamer, ThreadPool
 from swift.common.exceptions import DiskFileNotExist
 from gluster.swift.common.exceptions import AlreadyExistsAsDir
 from gluster.swift.common.utils import mkdirs, rmdirs, validate_object, \
@@ -78,7 +78,8 @@ class Gluster_DiskFile(DiskFile):
     def __init__(self, path, device, partition, account, container, obj,
                  logger, keep_data_fp=False,
                  disk_chunk_size=DEFAULT_DISK_CHUNK_SIZE,
-                 uid=DEFAULT_UID, gid=DEFAULT_GID, iter_hook=None):
+                 uid=DEFAULT_UID, gid=DEFAULT_GID, iter_hook=None,
+                 threadpool=None):
         self.disk_chunk_size = disk_chunk_size
         self.iter_hook = iter_hook
         # Don't support obj_name ending/begining with '/', like /a, a/, /a/b/,
@@ -109,6 +110,8 @@ class Gluster_DiskFile(DiskFile):
         self.read_to_eof = False
         self.quarantined_dir = None
         self.keep_cache = False
+        self.suppress_file_closing = False
+        self.threadpool = threadpool or ThreadPool(nthreads=0)
         self.uid = int(uid)
         self.gid = int(gid)
 
@@ -223,7 +226,7 @@ class Gluster_DiskFile(DiskFile):
         timestamp = normalize_timestamp(metadata[X_TIMESTAMP])
         write_metadata(self.tmppath, metadata)
         if X_CONTENT_LENGTH in metadata:
-            self.drop_cache(fd, 0, int(metadata[X_CONTENT_LENGTH]))
+            self._drop_cache(fd, 0, int(metadata[X_CONTENT_LENGTH]))
         do_fsync(fd)
         if self._obj_path:
             dir_objs = self._obj_path.split('/')

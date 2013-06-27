@@ -18,12 +18,13 @@ from __future__ import with_statement
 import os
 import time
 import traceback
-from xml.sax import saxutils
 
 from eventlet import Timeout
 
 import swift.common.db
-from swift.common.db import AccountBroker
+from swift.account.utils import account_listing_response, \
+    account_listing_content_type
+from swift.common.db import AccountBroker, DatabaseConnectionError
 from swift.common.utils import get_logger, get_param, hash_path, public, \
     normalize_timestamp, storage_directory, config_true_value, \
     validate_device_partition, json, timing_stats
@@ -33,7 +34,7 @@ from swift.common.db_replicator import ReplicatorRpc
 from swift.common.swob import HTTPAccepted, HTTPBadRequest, \
     HTTPCreated, HTTPForbidden, HTTPInternalServerError, \
     HTTPMethodNotAllowed, HTTPNoContent, HTTPNotFound, \
-    HTTPPreconditionFailed, HTTPConflict, Request, Response, \
+    HTTPPreconditionFailed, HTTPConflict, Request, \
     HTTPInsufficientStorage, HTTPNotAcceptable
 
 
@@ -47,6 +48,18 @@ class AccountController(object):
         self.logger = get_logger(conf, log_route='account-server')
         self.root = conf.get('devices', '/srv/node')
         self.mount_check = config_true_value(conf.get('mount_check', 'true'))
+        replication_server = conf.get('replication_server', None)
+        if replication_server is None:
+            allowed_methods = ['DELETE', 'PUT', 'HEAD', 'GET', 'REPLICATE',
+                               'POST']
+        else:
+            replication_server = config_true_value(replication_server)
+            if replication_server:
+                allowed_methods = ['REPLICATE']
+            else:
+                allowed_methods = ['DELETE', 'PUT', 'HEAD', 'GET', 'POST']
+        self.replication_server = replication_server
+        self.allowed_methods = allowed_methods
         self.replicator_rpc = ReplicatorRpc(self.root, DATADIR, AccountBroker,
                                             self.mount_check,
                                             logger=self.logger)
@@ -60,6 +73,20 @@ class AccountController(object):
         db_dir = storage_directory(DATADIR, part, hsh)
         db_path = os.path.join(self.root, drive, db_dir, hsh + '.db')
         return AccountBroker(db_path, account=account, logger=self.logger)
+
+    def _deleted_response(self, broker, req, resp, body=''):
+        # We are here since either the account does not exist or
+        # it exists but marked for deletion.
+        headers = {}
+        # Try to check if account exists and is marked for deletion
+        try:
+            if broker.is_status_deleted():
+                # Account does exist and is marked for deletion
+                headers = {'X-Account-Status': 'Deleted'}
+        except DatabaseConnectionError:
+            # Account does not exist!
+            pass
+        return resp(request=req, headers=headers, charset='utf-8', body=body)
 
     @public
     @timing_stats()
@@ -79,9 +106,9 @@ class AccountController(object):
                                   content_type='text/plain')
         broker = self._get_account_broker(drive, part, account)
         if broker.is_deleted():
-            return HTTPNotFound(request=req)
+            return self._deleted_response(broker, req, HTTPNotFound)
         broker.delete_db(req.headers['x-timestamp'])
-        return HTTPNoContent(request=req)
+        return self._deleted_response(broker, req, HTTPNoContent)
 
     @public
     @timing_stats()
@@ -101,8 +128,11 @@ class AccountController(object):
                 broker.pending_timeout = 3
             if account.startswith(self.auto_create_account_prefix) and \
                     not os.path.exists(broker.db_file):
-                broker.initialize(normalize_timestamp(
-                    req.headers.get('x-timestamp') or time.time()))
+                try:
+                    broker.initialize(normalize_timestamp(
+                        req.headers.get('x-timestamp') or time.time()))
+                except swift.common.db.DatabaseAlreadyExists:
+                    pass
             if req.headers.get('x-account-override-deleted', 'no').lower() != \
                     'yes' and broker.is_deleted():
                 return HTTPNotFound(request=req)
@@ -118,10 +148,14 @@ class AccountController(object):
         else:   # put account
             timestamp = normalize_timestamp(req.headers['x-timestamp'])
             if not os.path.exists(broker.db_file):
-                broker.initialize(timestamp)
-                created = True
+                try:
+                    broker.initialize(timestamp)
+                    created = True
+                except swift.common.db.DatabaseAlreadyExists:
+                    pass
             elif broker.is_status_deleted():
-                return HTTPForbidden(request=req, body='Recently deleted')
+                return self._deleted_response(broker, req, HTTPForbidden,
+                                              body='Recently deleted')
             else:
                 created = broker.is_deleted()
                 broker.update_put_timestamp(timestamp)
@@ -148,13 +182,25 @@ class AccountController(object):
         except ValueError, err:
             return HTTPBadRequest(body=str(err), content_type='text/plain',
                                   request=req)
+        try:
+            query_format = get_param(req, 'format')
+        except UnicodeDecodeError:
+            return HTTPBadRequest(body='parameters not utf8',
+                                  content_type='text/plain', request=req)
+        if query_format:
+            req.accept = FORMAT2CONTENT_TYPE.get(
+                query_format.lower(), FORMAT2CONTENT_TYPE['plain'])
+        out_content_type = req.accept.best_match(
+            ['text/plain', 'application/json', 'application/xml', 'text/xml'])
+        if not out_content_type:
+            return HTTPNotAcceptable(request=req)
         if self.mount_check and not check_mount(self.root, drive):
             return HTTPInsufficientStorage(drive=drive, request=req)
         broker = self._get_account_broker(drive, part, account)
         broker.pending_timeout = 0.1
         broker.stale_reads_ok = True
         if broker.is_deleted():
-            return HTTPNotFound(request=req)
+            return self._deleted_response(broker, req, HTTPNotFound)
         info = broker.get_info()
         headers = {
             'X-Account-Container-Count': info['container_count'],
@@ -165,13 +211,7 @@ class AccountController(object):
         headers.update((key, value)
                        for key, (value, timestamp) in
                        broker.metadata.iteritems() if value != '')
-        if get_param(req, 'format'):
-            req.accept = FORMAT2CONTENT_TYPE.get(
-                get_param(req, 'format').lower(), FORMAT2CONTENT_TYPE['plain'])
-        headers['Content-Type'] = req.accept.best_match(
-            ['text/plain', 'application/json', 'application/xml', 'text/xml'])
-        if not headers['Content-Type']:
-            return HTTPNotAcceptable(request=req)
+        headers['Content-Type'] = out_content_type
         return HTTPNoContent(request=req, headers=headers, charset='utf-8')
 
     @public
@@ -184,23 +224,6 @@ class AccountController(object):
         except ValueError, err:
             return HTTPBadRequest(body=str(err), content_type='text/plain',
                                   request=req)
-        if self.mount_check and not check_mount(self.root, drive):
-            return HTTPInsufficientStorage(drive=drive, request=req)
-        broker = self._get_account_broker(drive, part, account)
-        broker.pending_timeout = 0.1
-        broker.stale_reads_ok = True
-        if broker.is_deleted():
-            return HTTPNotFound(request=req)
-        info = broker.get_info()
-        resp_headers = {
-            'X-Account-Container-Count': info['container_count'],
-            'X-Account-Object-Count': info['object_count'],
-            'X-Account-Bytes-Used': info['bytes_used'],
-            'X-Timestamp': info['created_at'],
-            'X-PUT-Timestamp': info['put_timestamp']}
-        resp_headers.update((key, value)
-                            for key, (value, timestamp) in
-                            broker.metadata.iteritems() if value != '')
         try:
             prefix = get_param(req, 'prefix')
             delimiter = get_param(req, 'delimiter')
@@ -217,50 +240,23 @@ class AccountController(object):
                                                   ACCOUNT_LISTING_LIMIT)
             marker = get_param(req, 'marker', '')
             end_marker = get_param(req, 'end_marker')
-            query_format = get_param(req, 'format')
         except UnicodeDecodeError, err:
             return HTTPBadRequest(body='parameters not utf8',
                                   content_type='text/plain', request=req)
-        if query_format:
-            req.accept = FORMAT2CONTENT_TYPE.get(query_format.lower(),
-                                                 FORMAT2CONTENT_TYPE['plain'])
-        out_content_type = req.accept.best_match(
-            ['text/plain', 'application/json', 'application/xml', 'text/xml'])
-        if not out_content_type:
-            return HTTPNotAcceptable(request=req)
-        account_list = broker.list_containers_iter(limit, marker, end_marker,
-                                                   prefix, delimiter)
-        if out_content_type == 'application/json':
-            data = []
-            for (name, object_count, bytes_used, is_subdir) in account_list:
-                if is_subdir:
-                    data.append({'subdir': name})
-                else:
-                    data.append({'name': name, 'count': object_count,
-                                'bytes': bytes_used})
-            account_list = json.dumps(data)
-        elif out_content_type.endswith('/xml'):
-            output_list = ['<?xml version="1.0" encoding="UTF-8"?>',
-                           '<account name="%s">' % account]
-            for (name, object_count, bytes_used, is_subdir) in account_list:
-                name = saxutils.escape(name)
-                if is_subdir:
-                    output_list.append('<subdir name="%s" />' % name)
-                else:
-                    item = '<container><name>%s</name><count>%s</count>' \
-                           '<bytes>%s</bytes></container>' % \
-                           (name, object_count, bytes_used)
-                    output_list.append(item)
-            output_list.append('</account>')
-            account_list = '\n'.join(output_list)
-        else:
-            if not account_list:
-                return HTTPNoContent(request=req, headers=resp_headers)
-            account_list = '\n'.join(r[0] for r in account_list) + '\n'
-        ret = Response(body=account_list, request=req, headers=resp_headers)
-        ret.content_type = out_content_type
-        ret.charset = 'utf-8'
-        return ret
+        out_content_type, error = account_listing_content_type(req)
+        if error:
+            return error
+
+        if self.mount_check and not check_mount(self.root, drive):
+            return HTTPInsufficientStorage(drive=drive, request=req)
+        broker = self._get_account_broker(drive, part, account)
+        broker.pending_timeout = 0.1
+        broker.stale_reads_ok = True
+        if broker.is_deleted():
+            return self._deleted_response(broker, req, HTTPNotFound)
+        return account_listing_response(account, req, out_content_type, broker,
+                                        limit, marker, end_marker, prefix,
+                                        delimiter)
 
     @public
     @timing_stats()
@@ -305,7 +301,7 @@ class AccountController(object):
             return HTTPInsufficientStorage(drive=drive, request=req)
         broker = self._get_account_broker(drive, part, account)
         if broker.is_deleted():
-            return HTTPNotFound(request=req)
+            return self._deleted_response(broker, req, HTTPNotFound)
         timestamp = normalize_timestamp(req.headers['x-timestamp'])
         metadata = {}
         metadata.update((key, (value, timestamp))
@@ -327,6 +323,8 @@ class AccountController(object):
                 try:
                     method = getattr(self, req.method)
                     getattr(method, 'publicly_accessible')
+                    if req.method not in self.allowed_methods:
+                        raise AttributeError('Not allowed method.')
                 except AttributeError:
                     res = HTTPMethodNotAllowed()
                 else:

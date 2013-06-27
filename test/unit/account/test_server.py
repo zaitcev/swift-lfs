@@ -15,6 +15,7 @@
 
 import errno
 import os
+import mock
 import unittest
 from shutil import rmtree
 from StringIO import StringIO
@@ -48,6 +49,7 @@ class TestAccountController(unittest.TestCase):
             'HTTP_X_TIMESTAMP': '0'})
         resp = self.controller.DELETE(req)
         self.assertEquals(resp.status_int, 404)
+        self.assertTrue('X-Account-Status' not in resp.headers)
 
     def test_DELETE_empty(self):
         req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'PUT',
@@ -57,6 +59,7 @@ class TestAccountController(unittest.TestCase):
             'HTTP_X_TIMESTAMP': '1'})
         resp = self.controller.DELETE(req)
         self.assertEquals(resp.status_int, 204)
+        self.assertEquals(resp.headers['X-Account-Status'], 'Deleted')
 
     def test_DELETE_not_empty(self):
         req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'PUT',
@@ -73,6 +76,7 @@ class TestAccountController(unittest.TestCase):
         resp = self.controller.DELETE(req)
         # We now allow deleting non-empty accounts
         self.assertEquals(resp.status_int, 204)
+        self.assertEquals(resp.headers['X-Account-Status'], 'Deleted')
 
     def test_DELETE_now_empty(self):
         req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'PUT',
@@ -98,6 +102,7 @@ class TestAccountController(unittest.TestCase):
             'HTTP_X_TIMESTAMP': '1'})
         resp = self.controller.DELETE(req)
         self.assertEquals(resp.status_int, 204)
+        self.assertEquals(resp.headers['X-Account-Status'], 'Deleted')
 
     def test_DELETE_invalid_partition(self):
         req = Request.blank('/sda1/./a', environ={'REQUEST_METHOD': 'DELETE',
@@ -122,9 +127,29 @@ class TestAccountController(unittest.TestCase):
         self.assertEquals(resp.status_int, 507)
 
     def test_HEAD_not_found(self):
+        # Test the case in which account does not exist (can be recreated)
         req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'HEAD'})
         resp = self.controller.HEAD(req)
         self.assertEquals(resp.status_int, 404)
+        self.assertTrue('X-Account-Status' not in resp.headers)
+
+        # Test the case in which account was deleted but not yet reaped
+        req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'PUT',
+                                                  'HTTP_X_TIMESTAMP': '0'})
+        self.controller.PUT(req)
+        req = Request.blank('/sda1/p/a/c1', environ={'REQUEST_METHOD': 'PUT'},
+                            headers={'X-Put-Timestamp': '1',
+                                     'X-Delete-Timestamp': '0',
+                                     'X-Object-Count': '0',
+                                     'X-Bytes-Used': '0'})
+        self.controller.PUT(req)
+        req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'DELETE',
+                                                  'HTTP_X_TIMESTAMP': '1'})
+        resp = self.controller.DELETE(req)
+        req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'HEAD'})
+        resp = self.controller.HEAD(req)
+        self.assertEquals(resp.status_int, 404)
+        self.assertEquals(resp.headers['X-Account-Status'], 'Deleted')
 
     def test_HEAD_empty_account(self):
         req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'PUT',
@@ -190,9 +215,6 @@ class TestAccountController(unittest.TestCase):
         self.assertEquals(resp.status_int, 400)
 
     def test_HEAD_invalid_content_type(self):
-        req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'PUT',
-                                                  'HTTP_X_TIMESTAMP': '0'})
-        self.controller.PUT(req)
         req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'HEAD'},
                             headers={'Accept': 'application/plain'})
         resp = self.controller.HEAD(req)
@@ -205,6 +227,13 @@ class TestAccountController(unittest.TestCase):
         resp = self.controller.HEAD(req)
         self.assertEquals(resp.status_int, 507)
 
+    def test_HEAD_invalid_format(self):
+        format = '%D1%BD%8A9'  # invalid UTF-8; should be %E1%BD%8A9 (E -> D)
+        req = Request.blank('/sda1/p/a?format=' + format,
+                            environ={'REQUEST_METHOD': 'HEAD'})
+        resp = self.controller.HEAD(req)
+        self.assertEquals(resp.status_int, 400)
+
     def test_PUT_not_found(self):
         req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT'},
             headers={'X-PUT-Timestamp': normalize_timestamp(1),
@@ -214,6 +243,7 @@ class TestAccountController(unittest.TestCase):
                      'X-Timestamp': normalize_timestamp(0)})
         resp = self.controller.PUT(req)
         self.assertEquals(resp.status_int, 404)
+        self.assertTrue('X-Account-Status' not in resp.headers)
 
     def test_PUT(self):
         req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'PUT',
@@ -239,6 +269,7 @@ class TestAccountController(unittest.TestCase):
         resp = self.controller.PUT(req)
         self.assertEquals(resp.status_int, 403)
         self.assertEquals(resp.body, 'Recently deleted')
+        self.assertEquals(resp.headers['X-Account-Status'], 'Deleted')
 
     def test_PUT_GET_metadata(self):
         # Set metadata header
@@ -383,11 +414,32 @@ class TestAccountController(unittest.TestCase):
                                                   'HTTP_X_TIMESTAMP': '2'})
         resp = self.controller.POST(req)
         self.assertEquals(resp.status_int, 404)
+        self.assertEquals(resp.headers['X-Account-Status'], 'Deleted')
 
     def test_GET_not_found_plain(self):
+        # Test the case in which account does not exist (can be recreated)
         req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'GET'})
         resp = self.controller.GET(req)
         self.assertEquals(resp.status_int, 404)
+        self.assertTrue('X-Account-Status' not in resp.headers)
+
+        # Test the case in which account was deleted but not yet reaped
+        req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'PUT',
+                                                  'HTTP_X_TIMESTAMP': '0'})
+        self.controller.PUT(req)
+        req = Request.blank('/sda1/p/a/c1', environ={'REQUEST_METHOD': 'PUT'},
+                            headers={'X-Put-Timestamp': '1',
+                                     'X-Delete-Timestamp': '0',
+                                     'X-Object-Count': '0',
+                                     'X-Bytes-Used': '0'})
+        self.controller.PUT(req)
+        req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'DELETE',
+                                                  'HTTP_X_TIMESTAMP': '1'})
+        resp = self.controller.DELETE(req)
+        req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'GET'})
+        resp = self.controller.GET(req)
+        self.assertEquals(resp.status_int, 404)
+        self.assertEquals(resp.headers['X-Account-Status'], 'Deleted')
 
     def test_GET_not_found_json(self):
         req = Request.blank('/sda1/p/a?format=json',
@@ -408,6 +460,8 @@ class TestAccountController(unittest.TestCase):
         req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'GET'})
         resp = self.controller.GET(req)
         self.assertEquals(resp.status_int, 204)
+        self.assertEquals(resp.headers['Content-Type'],
+                          'text/plain; charset=utf-8')
 
     def test_GET_empty_account_json(self):
         req = Request.blank('/sda1/p/a?format=json',
@@ -417,6 +471,8 @@ class TestAccountController(unittest.TestCase):
                             environ={'REQUEST_METHOD': 'GET'})
         resp = self.controller.GET(req)
         self.assertEquals(resp.status_int, 200)
+        self.assertEquals(resp.headers['Content-Type'],
+                          'application/json; charset=utf-8')
 
     def test_GET_empty_account_xml(self):
         req = Request.blank('/sda1/p/a?format=xml',
@@ -426,11 +482,10 @@ class TestAccountController(unittest.TestCase):
                             environ={'REQUEST_METHOD': 'GET'})
         resp = self.controller.GET(req)
         self.assertEquals(resp.status_int, 200)
+        self.assertEquals(resp.headers['Content-Type'],
+                          'application/xml; charset=utf-8')
 
     def test_GET_over_limit(self):
-        req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'PUT',
-            'HTTP_X_TIMESTAMP': '0'})
-        self.controller.PUT(req)
         req = Request.blank('/sda1/p/a?limit=%d' %
             (ACCOUNT_LISTING_LIMIT + 1), environ={'REQUEST_METHOD': 'GET'})
         resp = self.controller.GET(req)
@@ -630,6 +685,66 @@ class TestAccountController(unittest.TestCase):
         node = [n for n in container if n.nodeName == 'bytes'][0]
         self.assertEquals(node.firstChild.nodeValue, '4')
         self.assertEquals(resp.charset, 'utf-8')
+
+    def test_GET_xml_escapes_account_name(self):
+        req = Request.blank(
+            '/sda1/p/%22%27',   # "'
+            environ={'REQUEST_METHOD': 'PUT', 'HTTP_X_TIMESTAMP': '0'})
+        self.controller.PUT(req)
+
+        req = Request.blank(
+            '/sda1/p/%22%27?format=xml',
+            environ={'REQUEST_METHOD': 'GET', 'HTTP_X_TIMESTAMP': '1'})
+        resp = self.controller.GET(req)
+
+        dom = xml.dom.minidom.parseString(resp.body)
+        self.assertEquals(dom.firstChild.attributes['name'].value, '"\'')
+
+    def test_GET_xml_escapes_container_name(self):
+        req = Request.blank(
+            '/sda1/p/a',
+            environ={'REQUEST_METHOD': 'PUT', 'HTTP_X_TIMESTAMP': '0'})
+        self.controller.PUT(req)
+
+        req = Request.blank(
+            '/sda1/p/a/%22%3Cword',  # "<word
+            environ={'REQUEST_METHOD': 'PUT', 'HTTP_X_TIMESTAMP': '1',
+                     'HTTP_X_PUT_TIMESTAMP': '1', 'HTTP_X_OBJECT_COUNT': '0',
+                     'HTTP_X_DELETE_TIMESTAMP': '0', 'HTTP_X_BYTES_USED': '1'})
+        self.controller.PUT(req)
+
+        req = Request.blank(
+            '/sda1/p/a?format=xml',
+            environ={'REQUEST_METHOD': 'GET', 'HTTP_X_TIMESTAMP': '1'})
+        resp = self.controller.GET(req)
+        dom = xml.dom.minidom.parseString(resp.body)
+
+        self.assertEquals(
+            dom.firstChild.firstChild.nextSibling.firstChild.firstChild.data,
+            '"<word')
+
+    def test_GET_xml_escapes_container_name_as_subdir(self):
+        req = Request.blank(
+            '/sda1/p/a',
+            environ={'REQUEST_METHOD': 'PUT', 'HTTP_X_TIMESTAMP': '0'})
+        self.controller.PUT(req)
+
+        req = Request.blank(
+            '/sda1/p/a/%22%3Cword-test',  # "<word-test
+            environ={'REQUEST_METHOD': 'PUT', 'HTTP_X_TIMESTAMP': '1',
+                     'HTTP_X_PUT_TIMESTAMP': '1', 'HTTP_X_OBJECT_COUNT': '0',
+                     'HTTP_X_DELETE_TIMESTAMP': '0', 'HTTP_X_BYTES_USED': '1'})
+        self.controller.PUT(req)
+
+        req = Request.blank(
+            '/sda1/p/a?format=xml&delimiter=-',
+            environ={'REQUEST_METHOD': 'GET', 'HTTP_X_TIMESTAMP': '1'})
+        resp = self.controller.GET(req)
+        dom = xml.dom.minidom.parseString(resp.body)
+
+        self.assertEquals(
+            dom.firstChild.firstChild.nextSibling.attributes['name'].value,
+            '"<word-')
 
     def test_GET_limit_marker_plain(self):
         req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'PUT',
@@ -862,7 +977,14 @@ class TestAccountController(unittest.TestCase):
         resp = self.controller.GET(req)
         self.assertEquals(resp.status_int, 406)
 
-    def test_GET_prefix_delimeter_plain(self):
+    def test_GET_delimiter_too_long(self):
+        req = Request.blank('/sda1/p/a?delimiter=xx',
+                            environ={'REQUEST_METHOD': 'GET',
+                                     'HTTP_X_TIMESTAMP': '0'})
+        resp = self.controller.GET(req)
+        self.assertEquals(resp.status_int, 412)
+
+    def test_GET_prefix_delimiter_plain(self):
         req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'PUT',
             'HTTP_X_TIMESTAMP': '0'})
         resp = self.controller.PUT(req)
@@ -902,7 +1024,7 @@ class TestAccountController(unittest.TestCase):
         self.assertEquals(resp.body.strip().split('\n'),
             ['sub.1.0', 'sub.1.1', 'sub.1.2'])
 
-    def test_GET_prefix_delimeter_json(self):
+    def test_GET_prefix_delimiter_json(self):
         req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'PUT',
                 'HTTP_X_TIMESTAMP': '0'})
         resp = self.controller.PUT(req)
@@ -945,7 +1067,7 @@ class TestAccountController(unittest.TestCase):
                            for n in simplejson.loads(resp.body)],
             ['sub.1.0', 'sub.1.1', 'sub.1.2'])
 
-    def test_GET_prefix_delimeter_xml(self):
+    def test_GET_prefix_delimiter_xml(self):
         req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'PUT',
             'HTTP_X_TIMESTAMP': '0'})
         resp = self.controller.PUT(req)
@@ -1133,18 +1255,30 @@ class TestAccountController(unittest.TestCase):
             self.assertEquals(resp.status_int, 200)
 
     def test_params_utf8(self):
-        self.controller.PUT(Request.blank('/sda1/p/a',
-                            headers={'X-Timestamp': normalize_timestamp(1)},
-                            environ={'REQUEST_METHOD': 'PUT'}))
-        for param in ('delimiter', 'limit', 'marker', 'prefix'):
+        # Bad UTF8 sequence, all parameters should cause 400 error
+        for param in ('delimiter', 'limit', 'marker', 'prefix', 'end_marker',
+                      'format'):
             req = Request.blank('/sda1/p/a?%s=\xce' % param,
                                 environ={'REQUEST_METHOD': 'GET'})
             resp = self.controller.GET(req)
-            self.assertEquals(resp.status_int, 400)
+            self.assertEquals(resp.status_int, 400,
+                              "%d on param %s" % (resp.status_int, param))
+        # Good UTF8 sequence for delimiter, too long (1 byte delimiters only)
+        req = Request.blank('/sda1/p/a?delimiter=\xce\xa9',
+                            environ={'REQUEST_METHOD': 'GET'})
+        resp = self.controller.GET(req)
+        self.assertEquals(resp.status_int, 412,
+                          "%d on param delimiter" % (resp.status_int))
+        self.controller.PUT(Request.blank('/sda1/p/a',
+                            headers={'X-Timestamp': normalize_timestamp(1)},
+                            environ={'REQUEST_METHOD': 'PUT'}))
+        # Good UTF8 sequence, ignored for limit, doesn't affect other queries
+        for param in ('limit', 'marker', 'prefix', 'end_marker', 'format'):
             req = Request.blank('/sda1/p/a?%s=\xce\xa9' % param,
                                 environ={'REQUEST_METHOD': 'GET'})
             resp = self.controller.GET(req)
-            self.assert_(resp.status_int in (204, 412), resp.status_int)
+            self.assertEquals(resp.status_int, 204,
+                              "%d on param %s" % (resp.status_int, param))
 
     def test_put_auto_create(self):
         headers = {'x-put-timestamp': normalize_timestamp(1),
@@ -1197,6 +1331,120 @@ class TestAccountController(unittest.TestCase):
         self.assertEquals(resp.content_type, 'application/xml')
         self.assertEquals(resp.charset, 'utf-8')
 
+    def test_serv_reserv(self):
+        """
+        Test replication_server flag
+        was set from configuration file.
+        """
+        conf = {'devices': self.testdir, 'mount_check': 'false'}
+        self.assertEquals(AccountController(conf).replication_server, None)
+        for val in [True, '1', 'True', 'true']:
+            conf['replication_server'] = val
+            self.assertTrue(AccountController(conf).replication_server)
+        for val in [False, 0, '0', 'False', 'false', 'test_string']:
+            conf['replication_server'] = val
+            self.assertFalse(AccountController(conf).replication_server)
+
+    def test_list_allowed_methods(self):
+        """ Test list of allowed_methods """
+        methods = ['DELETE', 'PUT', 'HEAD', 'GET', 'REPLICATE', 'POST']
+        self.assertEquals(self.controller.allowed_methods, methods)
+
+    def test_allowed_methods_from_configuration_file(self):
+        """
+        Test list of allowed_methods which
+        were set from configuration file.
+        """
+        conf = {'devices': self.testdir, 'mount_check': 'false'}
+        self.assertEquals(AccountController(conf).allowed_methods,
+                          ['DELETE', 'PUT', 'HEAD', 'GET', 'REPLICATE',
+                           'POST'])
+        conf['replication_server'] = 'True'
+        self.assertEquals(AccountController(conf).allowed_methods,
+                          ['REPLICATE'])
+        conf['replication_server'] = 'False'
+        self.assertEquals(AccountController(conf).allowed_methods,
+                          ['DELETE', 'PUT', 'HEAD', 'GET', 'POST'])
+
+    def test_correct_allowed_method(self):
+        """
+        Test correct work for allowed method using
+        swift.account_server.AccountController.__call__
+        """
+        inbuf = StringIO()
+        errbuf = StringIO()
+        outbuf = StringIO()
+
+        def start_response(*args):
+            """ Sends args to outbuf """
+            outbuf.writelines(args)
+
+        method = self.controller.allowed_methods[0]
+
+        env = {'REQUEST_METHOD': method,
+               'SCRIPT_NAME': '',
+               'PATH_INFO': '/sda1/p/a/c',
+               'SERVER_NAME': '127.0.0.1',
+               'SERVER_PORT': '8080',
+               'SERVER_PROTOCOL': 'HTTP/1.0',
+               'CONTENT_LENGTH': '0',
+               'wsgi.version': (1, 0),
+               'wsgi.url_scheme': 'http',
+               'wsgi.input': inbuf,
+               'wsgi.errors': errbuf,
+               'wsgi.multithread': False,
+               'wsgi.multiprocess': False,
+               'wsgi.run_once': False}
+
+        answer = ['<html><h1>Method Not Allowed</h1><p>The method is not '
+                  'allowed for this resource.</p></html>']
+
+        with mock.patch.object(self.controller, method,
+                               return_value=mock.MagicMock()) as mock_method:
+            response = self.controller.__call__(env, start_response)
+            self.assertNotEqual(response, answer)
+            self.assertEqual(mock_method.call_count, 1)
+
+    def test_not_allowed_method(self):
+        """
+        Test correct work for NOT allowed method using
+        swift.account_server.AccountController.__call__
+        """
+        inbuf = StringIO()
+        errbuf = StringIO()
+        outbuf = StringIO()
+
+        def start_response(*args):
+            """ Sends args to outbuf """
+            outbuf.writelines(args)
+
+        method = self.controller.allowed_methods[0]
+
+        env = {'REQUEST_METHOD': method,
+               'SCRIPT_NAME': '',
+               'PATH_INFO': '/sda1/p/a/c',
+               'SERVER_NAME': '127.0.0.1',
+               'SERVER_PORT': '8080',
+               'SERVER_PROTOCOL': 'HTTP/1.0',
+               'CONTENT_LENGTH': '0',
+               'wsgi.version': (1, 0),
+               'wsgi.url_scheme': 'http',
+               'wsgi.input': inbuf,
+               'wsgi.errors': errbuf,
+               'wsgi.multithread': False,
+               'wsgi.multiprocess': False,
+               'wsgi.run_once': False}
+
+        answer = ['<html><h1>Method Not Allowed</h1><p>The method is not '
+                  'allowed for this resource.</p></html>']
+
+        with mock.patch.object(self.controller, method,
+                               return_value=mock.MagicMock()) as mock_method:
+            self.controller.allowed_methods.remove(method)
+            response = self.controller.__call__(env, start_response)
+            self.assertEqual(mock_method.call_count, 0)
+            self.assertEqual(response, answer)
+            self.controller.allowed_methods.append(method)
 
 if __name__ == '__main__':
     unittest.main()

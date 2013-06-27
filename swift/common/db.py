@@ -49,6 +49,14 @@ def utf8encode(*args):
     return [(s.encode('utf8') if isinstance(s, unicode) else s) for s in args]
 
 
+def utf8encodekeys(metadata):
+    uni_keys = [k for k in metadata.keys() if isinstance(k, unicode)]
+    for k in uni_keys:
+        sv = metadata[k]
+        del metadata[k]
+        metadata[k.encode('utf-8')] = sv
+
+
 class DatabaseConnectionError(sqlite3.DatabaseError):
     """More friendly error messages for DB Errors."""
 
@@ -62,13 +70,23 @@ class DatabaseConnectionError(sqlite3.DatabaseError):
             self.path, self.timeout, self.msg)
 
 
+class DatabaseAlreadyExists(sqlite3.DatabaseError):
+    """More friendly error messages for DB Errors."""
+
+    def __init__(self, path):
+        self.path = path
+
+    def __str__(self):
+        return 'DB %s already exists' % self.path
+
+
 class GreenDBConnection(sqlite3.Connection):
     """SQLite DB Connection handler that plays well with eventlet."""
 
     def __init__(self, *args, **kwargs):
         self.timeout = kwargs.get('timeout', BROKER_TIMEOUT)
         kwargs['timeout'] = 0
-        self.db_file = args and args[0] or '-'
+        self.db_file = args[0] if args else'-'
         sqlite3.Connection.__init__(self, *args, **kwargs)
 
     def _timeout(self, call):
@@ -239,9 +257,7 @@ class DatabaseBroker(object):
                 if os.path.exists(self.db_file):
                     # It's as if there was a "condition" where different parts
                     # of the system were "racing" each other.
-                    raise DatabaseConnectionError(
-                        self.db_file,
-                        'DB created by someone else while working?')
+                    raise DatabaseAlreadyExists(self.db_file)
                 renamer(tmp_db_file, self.db_file)
             self.conn = get_db_connection(self.db_file, self.timeout)
         else:
@@ -550,6 +566,7 @@ class DatabaseBroker(object):
                 metadata = ''
         if metadata:
             metadata = json.loads(metadata)
+            utf8encodekeys(metadata)
         else:
             metadata = {}
         return metadata
@@ -574,7 +591,8 @@ class DatabaseBroker(object):
             try:
                 md = conn.execute('SELECT metadata FROM %s_stat' %
                                   self.db_type).fetchone()[0]
-                md = md and json.loads(md) or {}
+                md = json.loads(md) if md else {}
+                utf8encodekeys(md)
             except sqlite3.OperationalError, err:
                 if 'no such column: metadata' not in str(err):
                     raise
@@ -932,7 +950,7 @@ class ContainerBroker(DatabaseBroker):
             return (row['object_count'] in (None, '', 0, '0')) and \
                 (float(row['delete_timestamp']) > float(row['put_timestamp']))
 
-    def get_info(self, include_metadata=False):
+    def get_info(self):
         """
         Get global data for the container.
 
@@ -941,8 +959,6 @@ class ContainerBroker(DatabaseBroker):
                   reported_put_timestamp, reported_delete_timestamp,
                   reported_object_count, reported_bytes_used, hash, id,
                   x_container_sync_point1, and x_container_sync_point2.
-                  If include_metadata is set, metadata is included as a key
-                  pointing to a dict of tuples of the metadata
         """
         try:
             self._commit_puts()
@@ -951,8 +967,7 @@ class ContainerBroker(DatabaseBroker):
                 raise
         with self.get() as conn:
             data = None
-            trailing1 = 'metadata'
-            trailing2 = 'x_container_sync_point1, x_container_sync_point2'
+            trailing = 'x_container_sync_point1, x_container_sync_point2'
             while not data:
                 try:
                     data = conn.execute('''
@@ -960,25 +975,16 @@ class ContainerBroker(DatabaseBroker):
                             delete_timestamp, object_count, bytes_used,
                             reported_put_timestamp, reported_delete_timestamp,
                             reported_object_count, reported_bytes_used, hash,
-                            id, %s, %s
+                            id, %s
                         FROM container_stat
-                    ''' % (trailing1, trailing2)).fetchone()
+                    ''' % (trailing,)).fetchone()
                 except sqlite3.OperationalError, err:
-                    if 'no such column: metadata' in str(err):
-                        trailing1 = "'' as metadata"
-                    elif 'no such column: x_container_sync_point' in str(err):
-                        trailing2 = '-1 AS x_container_sync_point1, ' \
-                                    '-1 AS x_container_sync_point2'
+                    if 'no such column: x_container_sync_point' in str(err):
+                        trailing = '-1 AS x_container_sync_point1, ' \
+                                   '-1 AS x_container_sync_point2'
                     else:
                         raise
             data = dict(data)
-            if include_metadata:
-                try:
-                    data['metadata'] = json.loads(data.get('metadata', ''))
-                except ValueError:
-                    data['metadata'] = {}
-            elif 'metadata' in data:
-                del data['metadata']
             return data
 
     def set_x_container_sync_points(self, sync_point1, sync_point2):
@@ -1064,6 +1070,7 @@ class ContainerBroker(DatabaseBroker):
         :returns: list of tuples of (name, created_at, size, content_type,
                   etag)
         """
+        delim_force_gte = False
         (marker, end_marker, prefix, delimiter, path) = utf8encode(
             marker, end_marker, prefix, delimiter, path)
         try:
@@ -1088,7 +1095,12 @@ class ContainerBroker(DatabaseBroker):
                 if end_marker:
                     query += ' name < ? AND'
                     query_args.append(end_marker)
-                if marker and marker >= prefix:
+                if delim_force_gte:
+                    query += ' name >= ? AND'
+                    query_args.append(marker)
+                    # Always set back to False
+                    delim_force_gte = False
+                elif marker and marker >= prefix:
                     query += ' name > ? AND'
                     query_args.append(marker)
                 elif prefix:
@@ -1104,9 +1116,20 @@ class ContainerBroker(DatabaseBroker):
                 curs.row_factory = None
 
                 if prefix is None:
+                    # A delimiter without a specified prefix is ignored
                     return [r for r in curs]
                 if not delimiter:
-                    return [r for r in curs if r[0].startswith(prefix)]
+                    if not prefix:
+                        # It is possible to have a delimiter but no prefix
+                        # specified. As above, the prefix will be set to the
+                        # empty string, so avoid performing the extra work to
+                        # check against an empty prefix.
+                        return [r for r in curs]
+                    else:
+                        return [r for r in curs if r[0].startswith(prefix)]
+
+                # We have a delimiter and a prefix (possibly empty string) to
+                # handle
                 rowcount = 0
                 for row in curs:
                     rowcount += 1
@@ -1124,6 +1147,8 @@ class ContainerBroker(DatabaseBroker):
                             break
                     elif end > 0:
                         marker = name[:end] + chr(ord(delimiter) + 1)
+                        # we want result to be inclusinve of delim+1
+                        delim_force_gte = True
                         dir_name = name[:end + 1]
                         if dir_name != orig_marker:
                             results.append([dir_name, '0', 0, None, ''])
@@ -1526,9 +1551,9 @@ class AccountBroker(DatabaseBroker):
     def list_containers_iter(self, limit, marker, end_marker, prefix,
                              delimiter):
         """
-        Get a list of containerss sorted by name starting at marker onward, up
-        to limit entries.  Entries will begin with the prefix and will not
-        have the delimiter after the prefix.
+        Get a list of containers sorted by name starting at marker onward, up
+        to limit entries. Entries will begin with the prefix and will not have
+        the delimiter after the prefix.
 
         :param limit: maximum number of entries to get
         :param marker: marker query
@@ -1575,9 +1600,20 @@ class AccountBroker(DatabaseBroker):
                 curs.row_factory = None
 
                 if prefix is None:
+                    # A delimiter without a specified prefix is ignored
                     return [r for r in curs]
                 if not delimiter:
-                    return [r for r in curs if r[0].startswith(prefix)]
+                    if not prefix:
+                        # It is possible to have a delimiter but no prefix
+                        # specified. As above, the prefix will be set to the
+                        # empty string, so avoid performing the extra work to
+                        # check against an empty prefix.
+                        return [r for r in curs]
+                    else:
+                        return [r for r in curs if r[0].startswith(prefix)]
+
+                # We have a delimiter and a prefix (possibly empty string) to
+                # handle
                 rowcount = 0
                 for row in curs:
                     rowcount += 1
