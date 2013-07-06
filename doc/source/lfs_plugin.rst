@@ -1,11 +1,14 @@
-Existing API
-============
+=================
+LFS: Existing API
+=================
 
-* Internal Users in Code *
+Internal Users in Code
+----------------------
 
+``-
 DatabaseBroker:
   test/unit/common/test_db.py
-  # not used by anyone directly
+  # not used by anyone directly, inherited by ContainerBroker, AccountBroker
 
 ContainerBroker:
   swift/container/auditor.py:
@@ -54,7 +57,7 @@ ContainerBroker:
                     rows = broker.get_items_since(sync_point1, 1)
   swift/container/replicator.py:
     class ContainerReplicator(db_replicator.Replicator):
-    brokerclass = db.ContainerBroker # used later from bin/ somehow TBD
+    self.brokerclass = db.ContainerBroker # see swift/account/replicator.py
   swift/container/updater.py:
     def process_container(self, dbfile):
       spawn(container_report(http_connect('PUT')))
@@ -77,8 +80,7 @@ ContainerBroker:
     # filesystem. See test_run_once().
 
   test/unit/common/test_db_replicator.py:
-    db_replicator.Replicator.brokerclass
-    # TBD study how the brokerclass indirection works; likely trivial
+    db_replicator.Replicator.brokerclass  # see swift/account/replicator.py
 
 AccountBroker:
   swift/account/auditor.py:
@@ -129,7 +131,7 @@ AccountBroker:
 
   swift/account/replicator.py:
     class AccountReplicator(db_replicator.Replicator):
-      brokerclass = db.AccountBroker
+      self.brokerclass = db.AccountBroker
       run_forever() # via bin/swift-account-replicator -> run_daemon()
         run_once()
           dirs += os.path.join(self.root, node['device'], self.datadir)
@@ -184,7 +186,7 @@ AccountBroker:
   test/unit/common/test_db.py:
     class TestAccountBroker(unittest.TestCase):
         broker = AccountBroker(':memory:', account='a')
-        broker.get() # TBD: is get() used in real code at all?
+        broker.get()
         broker.put_container('o', normalize_timestamp(time()), 0, 0, 0)
         broker.reclaim(normalize_timestamp(time() - 999), time())
         broker.delete_db(normalize_timestamp(time()))
@@ -212,13 +214,227 @@ bin/swift-container-replicator:
 swift/common/utils.py:
   audit_location_generator - os.listdir, os.listdir, os.listdir
 
-* External Users in Code *
+-``
+
+External Users in Code
+----------------------
 
 GlusterFS
   https://github.com/gluster/gluster-swift
-  ??????
 
-* API notes *
+API definition and practices
+----------------------------
+
+The ``class AccountBroker`` and ``class ContainerBroker`` are very similar
+and inherit from the same class in the baseline implementation
+(swift.common.db.DatabaseBroker). So, we consider them together,
+calling them "Brocker".
+
+* DatabaseBroker.__init__:
+
+  |  def __init__(self, db_file, timeout=BROKER_TIMEOUT, logger=None,
+  |               account=None, container=None, pending_timeout=10,
+  |               stale_reads_ok=False):
+
+  Instance variables:
+
+  |  self.conn = None
+  |  self._db_file = db_file
+  |  self.pending_file = db_file + '.pending'
+  |  self.pending_timeout = pending_timeout
+  |  self.stale_reads_ok = stale_reads_ok
+  |  self.db_dir = os.path.dirname(db_file)
+  |  self.timeout = timeout
+  |  self.logger = logger or logging.getLogger()
+  |  self.account = account
+  |  self.container = container
+  |  self._db_version = -1
+
+  Class variables:
+
+  |  db_type = 'container'
+  |  db_contains_type = 'object'
+
+* __str__:
+  
+  |  def __str__(self):
+
+  Added by c/28009 when hiding broker.db_file.
+ 
+* _commit_puts(self, item_list=None):
+
+* _delete_db(self, conn, timestamp):
+
+* _initialize:
+
+  Internal detail; overridden by ContainerBroker and AccountBroker as a way
+  to share most of broker.initialize() code.
+
+  In AccountBroker, calls broker.create_container_table() and
+  broker.create_account_stat_table().
+
+* _newid(self, conn):
+
+  Same as newid() but assumes just-rsynched database.
+
+  Implemented by ContainerBroker only, but DatabaseBroker provides a stub.
+ 
+* _preallocate(self):
+
+* _reclaim(self, conn, timestamp):
+
+  Base
+
+* can_delete_db(self, cutoff):
+
+  Present in AccountBroker only.
+
+* create_object_table(self, conn):
+
+* create_container_stat_table(self, conn, put_timestamp=None):
+
+* delete_db
+
+  Baseline has ``with self.get() as conn:`` here, an internal use of .get().
+
+  XXX
+
+* delete_object(self, name, timestamp):
+
+  Present in ContainerBroker only.
+
+* empty()
+
+  TBD: only applicatble to AccountBroker?
+
+  Should be called is_empty(). Flushes pending updates, raising if not
+  broker.stale_reads_ok (TBD: set when and where?). Selects container count.
+
+* get_db_version(self, conn):
+
+  Implemented by both broker types. Baseline code generates a version
+  depending on other characteristics of the database: 0 or 1.
+
+  Currenly only used internaly by the baseline implementation,
+  considered not a part of API.
+
+* get_info(self):
+
+    Returns a dict.
+
+    Keys for container:  account, container, created_at,
+                  put_timestamp, delete_timestamp, object_count, bytes_used,
+                  reported_put_timestamp, reported_delete_timestamp,
+                  reported_object_count, reported_bytes_used, hash, id,
+                  x_container_sync_point1, and x_container_sync_point2.
+
+    Keyst for account:  account, created_at, put_timestamp,
+                  delete_timestamp, container_count, object_count,
+                  bytes_used, hash, id.
+
+* get_items_since(self, start, count):
+ 
+* get_replication_info(self):
+
+* get_sync(self, id, incoming=True):
+
+* get_syncs(self, incoming=True):
+
+* initialize:
+
+  Creates a database in the baseline. Side effect: saves an open connection
+  to database. GlusterFS works around lack of is_good() by leaving
+  broker.initialize() empty.
+
+  This can takes a special path ':memory:', is this used outside of tests?
+
+  This can raise DatabaseAlreadyExists.
+
+* is_deleted(self, timestamp=None):
+
+  Only ContainerBroker implements the timestamp argument.
+  TBD: how is the timestamp used? Race avoidance?
+
+* is_good:
+
+  Added by c/28009 when hiding broker.db_file. Basiline code is
+  os.path.exists(self.db_file).
+
+* is_status_deleted(self):
+
+  Present in AccountBroker only.
+
+* @contextmanager get(self):
+
+* @contextmanager lock(self):
+
+* list_containers_iter(self, limit, marker, end_marker, prefix,
+                             delimiter):
+
+  Present in AccountBroker only.
+
+* list_objects_iter(self, limit, marker, end_marker, prefix, delimiter,
+                    path=None):
+
+    Returns a list. TBD: could implementation return an interatable
+    other than a list?
+
+  Present in ContainerBroker only.
+
+* merge_items(self, item_list, source=None):
+
+* merge_timestamps(self, created_at, put_timestamp, delete_timestamp):
+ 
+* merge_syncs(self, sync_points, incoming=True):
+
+* @property metadata(self):
+
+  As you can see, broker.metadata is already a @property. In baseline,
+  it performs a select, so every access picks up new metadata from other
+  processes. Still, it's a read-only property (or should be).
+
+* newid(self, remote_id):
+
+  Docstring: "Re-id the database.  This should be called after an rsync."
+
+* possibly_quarantine
+
+  XXX
+
+* put_container(self, name, put_timestamp, delete_timestamp,
+                      object_count, bytes_used):
+
+  Present in AccountBroker only.
+
+* put_object(self, name, timestamp, size, content_type, etag, deleted=0):
+
+* reclaim(self, object_timestamp, sync_timestamp):
+
+  Actual brokers implement 2 timestamps.
+
+* reclaim(self, timestamp):
+
+  This is the base version with one timestamp only. TBD: confirm that
+  it is never used.
+
+* reported(self, put_timestamp, delete_timestamp, object_count,
+           bytes_used):
+
+    Updates "reported stats". The baseline updates container_stat table with
+    reported_bytes_used, reported_put_timestamp, etc.
+
+  Present in ContainerBroker only.
+
+* set_x_container_sync_points(self, sync_point1, sync_point2):
+
+* _set_x_container_sync_points(self, conn, sync_point1, sync_point2):
+
+* update_metadata(self, metadata_updates):
+
+* update_put_timestamp(self, timestamp):
+
+API notes
+---------
 
 broker.get_info()
  - side effect is quaranteening in case of problems, used by auditor
@@ -226,19 +442,32 @@ broker.pending_timeout = 0.1
 broker.stale_reads_ok = True
 broker.metadata - read/only property, can be emulated trivially in Python
 
-Planned Changes
-===============
+controller._get_account_broker()
+controller._get_container_broker()
 
-- db_file
-   is_good - Hadas -1, holding hostage for some unrelated thing
-     TBD review #s for both
-- put_xxx ??
-- pending_timeout = 0.1
-- stale_reads_ok
-- if broker.get is internal API, change tests or else rename _get()
+These are used to substitute a broker by alternative implementationsk
 
-TBD: API for replicator (swift/common/db_replicator.py) - outside of API? how?
-TBD: Container sync - is relevant or not? How to support?
-TBD: is_status_deleted() vs is_deleted() vs exists() or is_good(): doc, clarify
-TBD: anything else that gropes through the DBs besides audit_location_generator
-     and db_replicator.Replicator.run_once, walk_datadir, dispatch()?
+
+====================
+LFS: Planned Changes
+====================
+
+* db_file
+  .is_good() - David Hadas did -1, holding hostage for some unrelated thing
+    https://review.openstack.org/28009
+    https://review.openstack.org/26646
+* put_xxx ??
+* pending_timeout = 0.1
+* stale_reads_ok
+* if broker.get is internal API, change tests or else rename _get()
+* rearrange Swift tree so use of .initialize is logical (may require
+  changing GlusterFS, TBD)
+
+TBD:
+
+* API for replicator (swift/common/db_replicator.py) - outside of API? how?
+* Container sync - is relevant or not? How to support?
+* is_status_deleted() vs is_deleted() vs exists() or is_good(): doc, clarify
+* anything else that gropes through the DBs besides audit_location_generator
+  and db_replicator.Replicator.run_once, walk_datadir, dispatch()?
+* Is broker.get() used in real code at all? Or tests only?
