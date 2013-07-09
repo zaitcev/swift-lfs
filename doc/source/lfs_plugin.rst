@@ -167,8 +167,8 @@ AccountBroker:
         quarantine_db(broker._db_file, broker.db_type)
         broker.update_metadata(simplejson.loads(metadata))
         broker.merge_timestamps(.... args of sync())
-        info['point'] = broker.get_sync(id_)
-        broker.merge_syncs([{'remote_id': id_, 'sync_point': remote_sync}])
+        info['point'] = broker.get_sync(id)
+        broker.merge_syncs([{'remote_id': id, 'sync_point': remote_sync}])
       merge_syncs(self, broker, args):
         broker.merge_syncs(args[0])
       merge_items()
@@ -320,17 +320,20 @@ calling them "Brocker".
 
 * get_info(self):
 
-    Returns a dict.
+  Returns a dict.
 
-    Keys for container:  account, container, created_at,
+  Keys for container:  account, container, created_at,
                   put_timestamp, delete_timestamp, object_count, bytes_used,
                   reported_put_timestamp, reported_delete_timestamp,
                   reported_object_count, reported_bytes_used, hash, id,
                   x_container_sync_point1, and x_container_sync_point2.
 
-    Keyst for account:  account, created_at, put_timestamp,
+  Keys for account:  account, created_at, put_timestamp,
                   delete_timestamp, container_count, object_count,
                   bytes_used, hash, id.
+
+  A side effect of get_info is quaranteening in case of problems.
+  It is used by auditors.
 
 * get_items_since(self, start, count):
  
@@ -368,16 +371,14 @@ calling them "Brocker".
 
 * @contextmanager lock(self):
 
-* list_containers_iter(self, limit, marker, end_marker, prefix,
-                             delimiter):
+* list_containers_iter(self, limit, marker, end_marker, prefix, delim):
 
   Present in AccountBroker only.
 
-* list_objects_iter(self, limit, marker, end_marker, prefix, delimiter,
-                    path=None):
+* list_objects_iter(self, limit, marker, end_marker, prefix, delim, path=None):
 
-    Returns a list. TBD: could implementation return an interatable
-    other than a list?
+  Returns a list. TBD: could implementation return an interatable
+  other than a list?
 
   Present in ContainerBroker only.
 
@@ -389,20 +390,23 @@ calling them "Brocker".
 
 * @property metadata(self):
 
-  As you can see, broker.metadata is already a @property. In baseline,
-  it performs a select, so every access picks up new metadata from other
-  processes. Still, it's a read-only property (or should be).
+  metadata: A read/only property, can be emulated trivially in Python
+  using a @property decorator. The baseline implementation does that
+  and queries the database on every access. Thus, every access picks up
+  the updates from other processes.
 
 * newid(self, remote_id):
 
   Docstring: "Re-id the database.  This should be called after an rsync."
 
-* possibly_quarantine
+* possibly_quarantine:
 
   XXX
 
-* put_container(self, name, put_timestamp, delete_timestamp,
-                      object_count, bytes_used):
+* put_container():
+
+  | def put_container(self, name, put_timestamp, delete_timestamp,
+  |                   object_count, bytes_used)
 
   Present in AccountBroker only.
 
@@ -414,14 +418,16 @@ calling them "Brocker".
 
 * reclaim(self, timestamp):
 
-  This is the base version with one timestamp only. TBD: confirm that
-  it is never used.
+  This is the base version with one timestamp only.
+  TBD: confirm that it is never used.
 
-* reported(self, put_timestamp, delete_timestamp, object_count,
-           bytes_used):
+* reported():
 
-    Updates "reported stats". The baseline updates container_stat table with
-    reported_bytes_used, reported_put_timestamp, etc.
+  | def reported(self, put_timestamp, delete_timestamp, object_count,
+  |              bytes_used):
+
+  Updates "reported stats". The baseline updates container_stat table with
+  reported_bytes_used, reported_put_timestamp, etc.
 
   Present in ContainerBroker only.
 
@@ -433,35 +439,39 @@ calling them "Brocker".
 
 * update_put_timestamp(self, timestamp):
 
-API notes
----------
-
-broker.get_info()
- - side effect is quaranteening in case of problems, used by auditor
-broker.pending_timeout = 0.1
-broker.stale_reads_ok = True
-broker.metadata - read/only property, can be emulated trivially in Python
-
-controller._get_account_broker()
-controller._get_container_broker()
-
-These are used to substitute a broker by alternative implementationsk
-
 
 ====================
 LFS: Planned Changes
 ====================
 
-* db_file
-  .is_good() - David Hadas did -1, holding hostage for some unrelated thing
+* Remove db_file from the API. Note that it is used for diagnostics a lot.
+  There was some work done around the ".is_good() patch", but David Hadas
+  put a -1 on it, holding hostage for some unrelated thing. See:
     https://review.openstack.org/28009
     https://review.openstack.org/26646
-* put_xxx ??
-* pending_timeout = 0.1
-* stale_reads_ok
-* if broker.get is internal API, change tests or else rename _get()
-* rearrange Swift tree so use of .initialize is logical (may require
+
+* The put_container is difficult to implement without a real database,
+  because it has atomic lookup and update semantics. An implementation
+  hast to find a record of specific container, subtract its stats from
+  the account stats, then add new stats. All that is resistant to crashes
+  and hangs, using database transactions.
+
+* Remove or hide pending_timeout as implementation detail.
+
+* Remove stale_reads_ok or define it strongly.
+
+* If broker.get is internal API, change tests or else rename _get()
+
+* Rearrange Swift tree so use of .initialize is logical (may require
   changing GlusterFS, TBD)
+  * actually they already use .initialize now (7/7)
+
+* Rename "delete_db" into "delete" and generally rename things to make
+  it look less like they mandate or assume a database.
+
+* Modify AccountController and ContainerController to load a configured
+  plug-in directly, so inheriting them and overloading
+  _get_account_broker and _get_container_broker is not longer needed.
 
 TBD:
 
@@ -471,3 +481,4 @@ TBD:
 * anything else that gropes through the DBs besides audit_location_generator
   and db_replicator.Replicator.run_once, walk_datadir, dispatch()?
 * Is broker.get() used in real code at all? Or tests only?
+* What metods other than get_info trigger quarantine, and is it used anywhere?
