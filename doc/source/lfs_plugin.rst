@@ -236,19 +236,26 @@ calling them "Brocker".
   |               account=None, container=None, pending_timeout=10,
   |               stale_reads_ok=False):
 
-  Instance variables:
+  Instance variables that do not appear referred across API:
 
   |  self.conn = None
-  |  self._db_file = db_file
   |  self.pending_file = db_file + '.pending'
-  |  self.pending_timeout = pending_timeout
-  |  self.stale_reads_ok = stale_reads_ok
   |  self.db_dir = os.path.dirname(db_file)
   |  self.timeout = timeout
   |  self.logger = logger or logging.getLogger()
   |  self.account = account
   |  self.container = container
   |  self._db_version = -1
+
+  Instance variables that are referred across API:
+
+  | broker._db_file
+  | broker.pending_timeout
+  | broker.stale_reads_ok
+
+  The broker._db_file has a patch, see below. Other two are work items.
+
+  The broker.conn is not accessed directly, however refer to broker.get().
 
   Class variables:
 
@@ -293,11 +300,9 @@ calling them "Brocker".
 
 * create_container_stat_table(self, conn, put_timestamp=None):
 
-* delete_db
+* delete_db():
 
   Baseline has ``with self.get() as conn:`` here, an internal use of .get().
-
-  XXX
 
 * delete_object(self, name, timestamp):
 
@@ -369,6 +374,10 @@ calling them "Brocker".
 
 * @contextmanager get(self):
 
+  Returns a connection (yield conn). However, only used by tests.
+  Ergo, implementations do not need to implement get() unless they
+  aim to land in tree.
+
 * @contextmanager lock(self):
 
 * list_containers_iter(self, limit, marker, end_marker, prefix, delim):
@@ -401,7 +410,8 @@ calling them "Brocker".
 
 * possibly_quarantine:
 
-  XXX
+  Examine and re-raise an exception. In the baseline, quarantine the DB
+  if OSError.
 
 * put_container():
 
@@ -410,7 +420,9 @@ calling them "Brocker".
 
   Present in AccountBroker only.
 
-* put_object(self, name, timestamp, size, content_type, etag, deleted=0):
+* put_object():
+
+  | put_object(self, name, timestamp, size, content_type, etag, deleted=0):
 
 * reclaim(self, object_timestamp, sync_timestamp):
 
@@ -418,8 +430,9 @@ calling them "Brocker".
 
 * reclaim(self, timestamp):
 
-  This is the base version with one timestamp only.
-  TBD: confirm that it is never used.
+  This is the base version with one timestamp only, seems a historic accident.
+  See "Eliminate DatabaseBroker.reclaim":
+  https://review.openstack.org/36176
 
 * reported():
 
@@ -456,11 +469,11 @@ LFS: Planned Changes
   the account stats, then add new stats. All that is resistant to crashes
   and hangs, using database transactions.
 
-* Remove or hide pending_timeout as implementation detail.
+* Remove or hide pending_timeout as implementation detail. TBD: How?
 
-* Remove stale_reads_ok or define it strongly.
+* Remove stale_reads_ok or define it strongly (unambiguously and future-proof).
 
-* If broker.get is internal API, change tests or else rename _get()
+* Change tests or else rename get() to _get(), since it's an internal API.
 
 * Rearrange Swift tree so use of .initialize is logical (may require
   changing GlusterFS, TBD)
@@ -478,7 +491,6 @@ TBD:
 * API for replicator (swift/common/db_replicator.py) - outside of API? how?
 * Container sync - is relevant or not? How to support?
 * is_status_deleted() vs is_deleted() vs exists() or is_good(): doc, clarify
-* anything else that gropes through the DBs besides audit_location_generator
+* Anything else that gropes through the DBs besides audit_location_generator
   and db_replicator.Replicator.run_once, walk_datadir, dispatch()?
-* Is broker.get() used in real code at all? Or tests only?
 * What metods other than get_info trigger quarantine, and is it used anywhere?
