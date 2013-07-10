@@ -327,15 +327,15 @@ calling them "Brocker".
 
   Returns a dict.
 
-  Keys for container:  account, container, created_at,
-                  put_timestamp, delete_timestamp, object_count, bytes_used,
-                  reported_put_timestamp, reported_delete_timestamp,
-                  reported_object_count, reported_bytes_used, hash, id,
-                  x_container_sync_point1, and x_container_sync_point2.
+  Returned keys for container:  account, container, created_at,
+  put_timestamp, delete_timestamp, object_count, bytes_used,
+  reported_put_timestamp, reported_delete_timestamp,
+  reported_object_count, reported_bytes_used, hash, id,
+  x_container_sync_point1, and x_container_sync_point2.
 
-  Keys for account:  account, created_at, put_timestamp,
-                  delete_timestamp, container_count, object_count,
-                  bytes_used, hash, id.
+  Returned keys for account:  account, created_at, put_timestamp,
+  delete_timestamp, container_count, object_count,
+  bytes_used, hash, id.
 
   A side effect of get_info is quaranteening in case of problems.
   It is used by auditors.
@@ -453,6 +453,13 @@ calling them "Brocker".
 * update_put_timestamp(self, timestamp):
 
 
+Class ``DiskFile`` provides an API to object server.
+
+* DiskFile.__init__:
+
+  variables XXX
+
+
 ====================
 LFS: Planned Changes
 ====================
@@ -485,6 +492,18 @@ LFS: Planned Changes
 * Modify AccountController and ContainerController to load a configured
   plug-in directly, so inheriting them and overloading
   _get_account_broker and _get_container_broker is not longer needed.
+
+  In DiskFile, Peter uses a settable class method currently, e.g.:
+
+  | class ObjectController(object):
+  |   def __init__(self, conf, disk_file_klass=None):
+  |     if not disk_file_klass:
+  |       disk_file_klass = DiskFile
+  |     self.disk_file_klass = disk_file_klass
+  |   def POST(self, request):
+  |     disk_file = self.disk_file_klass(device, partition,
+  |                                      account, container, obj,
+  |                                      verify_existence=True)
 
 TBD:
 
