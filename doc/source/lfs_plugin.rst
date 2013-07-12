@@ -237,7 +237,115 @@ Class ``DiskFile`` provides an API to object server.
 
 * DiskFile.__init__:
 
-  variables XXX
+  | def __init__(self, path, device, partition, account, container, obj,
+  |              logger, keep_data_fp=False, disk_chunk_size=65536,
+  |              bytes_per_sync=(512 * 1024 * 1024), iter_hook=None,
+  |              threadpool=None):
+
+  Instance variables that do not appear referred across API:
+
+  | self.bytes_per_sync = bytes_per_sync
+  | self.disk_chunk_size = disk_chunk_size
+  | self.fp = open(self.data_file, 'rb')
+  | self.iter_hook = iter_hook
+  | self.name = '/' + '/'.join((account, container, obj))
+  | self.datadir = 
+  | self.device_path = os.path.join(path, device)
+  | self.tmpdir = os.path.join(path, device, 'tmp')
+  | self.logger = logger
+  | self.meta_file = None
+  | self.iter_etag = None
+  | self.started_at_0 = False
+  | self.read_to_eof = False
+  | self.suppress_file_closing = False
+  | self.threadpool = threadpool or ThreadPool(nthreads=0)
+  | self.metadata = read_metadata(self.fp)
+
+  Instance variables that are referred across API:
+
+  | self.quarantined_dir = None  -- used in auditor
+  | self.data_file = None        -- used in auditor, change to exists()
+  | self.keep_cache = False  -- used in server
+
+  DiskFile may have the object pre-opened (possibly for no good reason
+  in the baseline code), and has no __del__, so .close() should be called
+  before disposing.
+
+  The meta_file is going to be made a local variable during refactoring.
+
+  The metadata is a read-only property, but it is a real property in
+  ``DiskFile``, not overridden with @property decorator.
+
+* __iter__(self):
+
+* _drop_cache(self, fd, offset, length):
+
+* _handle_close_quarantine(self):
+
+* app_iter_range(self, start, stop):
+ 
+* app_iter_ranges(self, ranges, content_type, boundary, size):
+ 
+* close(self, verify_file=True):
+
+* get_data_file_size(self):
+
+    This is to be dropped. See https://review.openstack.org/34811
+
+* is_deleted(self):
+
+* is_expired(self):
+
+* put_metadata(self, metadata, tombstone=False):
+
+* quarantine(self):
+
+* unlinkold(self, timestamp):
+
+* writer(self, size=None):
+
+  Returns an instance of ``class DiskWriter``.
+
+
+Class ``DiskWriter`` is returned by DiskFile.writer() and tracks
+the state of an object being written, including things like total bytes
+and the running MD5 sum.
+
+A ``DiskFile`` and a ``DiskWriter`` of an implementation go together
+and thus refer to each other's internals, such as ``DiskFile.name``,
+not a part of API.
+
+* DiskWriter.__init__:
+
+  |  def __init__(self, disk_file, fd, tmppath, threadpool)
+
+  |  self.disk_file = disk_file
+
+  The parent DiskFile class.
+
+  |  self.fd = fd
+  |  self.tmppath = tmppath
+  |  self.upload_size = 0
+  |  self.last_sync = 0
+  |  self.threadpool = threadpool
+
+  Not invoked directly by Swift code, so not a part of API.
+
+* write():
+
+  |  def write(self, chunk)
+
+* put():
+
+  |  def put(self, metadata)
+
+  This is API definition. The baseline implementation may have an extra
+  argument, when write calls put(), but this is not part of API.
+  Implementors of back-ends only need to implement the definition above.
+
+Class ``DiskReader`` is not present in Swift 1.9.0. See review
+https://review.openstack.org/35381
+
 
 Internal Users in Code-like Format
 ----------------------------------
@@ -586,3 +694,7 @@ TBD:
 * Anything else that gropes through the DBs besides audit_location_generator
   and db_replicator.Replicator.run_once, walk_datadir, dispatch()?
 * What metods other than get_info trigger quarantine, and is it used anywhere?
+* DiskFile.suppress_file_closing is ugly, but is not an API problem.
+  Kill it now, or ignore until better times? Is it linked to Peter's "wart"
+  and open() outside of DiskReader?
+* Peter's DiskFile.usage has _
