@@ -27,7 +27,7 @@ calling them "Brocker".
   |  self.container = container
   |  self._db_version = -1
 
-  Instance variables that are referred across API:
+  Instance variables that are referred across API in 1.9.0:
 
   | broker._db_file
   | broker.pending_timeout
@@ -36,6 +36,10 @@ calling them "Brocker".
   The broker._db_file has a patch, see below. Other two are work items.
 
   The broker.conn is not accessed directly, however refer to broker.get().
+
+  GlusterFS UFO always ignores stale_reads_ok argument to DiskDir.__init__()
+  and sets the instance variable to False. This works because the controllers
+  never pass stale_reads_ok argument, but set with assignement only.
 
   Class variables:
 
@@ -72,6 +76,8 @@ calling them "Brocker".
 
   Base
 
+* _set_x_container_sync_points(self, conn, sync_point1, sync_point2):
+
 * can_delete_db(self, cutoff):
 
   Present in AccountBroker only.
@@ -93,7 +99,7 @@ calling them "Brocker".
   TBD: only applicatble to AccountBroker?
 
   Should be called is_empty(). Flushes pending updates, raising if not
-  broker.stale_reads_ok (TBD: set when and where?). Selects container count.
+  broker.stale_reads_ok. Fetches container count out of the DB.
 
 * get_db_version(self, conn):
 
@@ -120,9 +126,15 @@ calling them "Brocker".
   A side effect of get_info is quaranteening in case of problems.
   It is used by auditors.
 
+  Flushes pending updates, raising LockTimeout if not broker.stale_reads_ok.
+
 * get_items_since(self, start, count):
+
+  Flushes pending updates, raising LockTimeout if not broker.stale_reads_ok.
  
 * get_replication_info(self):
+
+  Flushes pending updates, raising LockTimeout if not broker.stale_reads_ok.
 
 * get_sync(self, id, incoming=True):
 
@@ -143,9 +155,11 @@ calling them "Brocker".
   Only ContainerBroker implements the timestamp argument.
   TBD: how is the timestamp used? Race avoidance?
 
+  Flushes pending updates, raising LockTimeout if not broker.stale_reads_ok.
+
 * is_good:
 
-  Added by c/28009 when hiding broker.db_file. Basiline code is
+  Added by c/28009 when hiding broker.db_file. Baseline code is
   os.path.exists(self.db_file).
 
 * is_status_deleted(self):
@@ -154,7 +168,7 @@ calling them "Brocker".
 
 * @contextmanager get(self):
 
-  Returns a connection (yield conn). However, only used by tests.
+  Returns a connection (``yield conn``). However, only used by tests.
   Ergo, implementations do not need to implement get() unless they
   aim to land in tree.
 
@@ -170,6 +184,8 @@ calling them "Brocker".
   other than a list?
 
   Present in ContainerBroker only.
+
+  Flushes pending updates, raising LockTimeout if not broker.stale_reads_ok.
 
 * merge_items(self, item_list, source=None):
 
@@ -225,8 +241,6 @@ calling them "Brocker".
   Present in ContainerBroker only.
 
 * set_x_container_sync_points(self, sync_point1, sync_point2):
-
-* _set_x_container_sync_points(self, conn, sync_point1, sync_point2):
 
 * update_metadata(self, metadata_updates):
 
@@ -659,7 +673,8 @@ LFS: Planned Changes
 
 * Remove or hide pending_timeout as implementation detail. TBD: How?
 
-* Remove stale_reads_ok or define it strongly (unambiguously and future-proof).
+* Move stale_reads_ok to argument or inside of _get_account_broker.
+  See review https://review.openstack.org/36919
 
 * Change tests or else rename get() to _get(), since it's an internal API.
 
@@ -686,6 +701,12 @@ LFS: Planned Changes
   |                                      account, container, obj,
   |                                      verify_existence=True)
 
+* Move mount checking into _diskfile()
+
+  This relieves the implementation from working around the checking done
+  by the core Swift.
+  https://review.openstack.org/35505
+
 TBD:
 
 * API for replicator (swift/common/db_replicator.py) - outside of API? how?
@@ -697,4 +718,5 @@ TBD:
 * DiskFile.suppress_file_closing is ugly, but is not an API problem.
   Kill it now, or ignore until better times? Is it linked to Peter's "wart"
   and open() outside of DiskReader?
-* Peter's DiskFile.usage has _
+* Peter's DiskFile.usage has _quarantined_dir with underscore, is this
+  in already? What review number?
