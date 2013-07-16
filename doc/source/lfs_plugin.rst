@@ -8,7 +8,7 @@ API definition and practices
 The ``class AccountBroker`` and ``class ContainerBroker`` are very similar
 and inherit from the same class in the baseline implementation
 (swift.common.db.DatabaseBroker). So, we consider them together,
-calling them "Brocker".
+calling them "Broker".
 
 * DatabaseBroker.__init__:
 
@@ -47,11 +47,11 @@ calling them "Brocker".
   |  db_contains_type = 'object'
 
 * __str__:
-  
+
   |  def __str__(self):
 
   Added by c/28009 when hiding broker.db_file.
- 
+
 * _commit_puts(self, item_list=None):
 
 * _delete_db(self, conn, timestamp):
@@ -69,7 +69,7 @@ calling them "Brocker".
   Same as newid() but assumes just-rsynched database.
 
   Implemented by ContainerBroker only, but DatabaseBroker provides a stub.
- 
+
 * _preallocate(self):
 
 * _reclaim(self, conn, timestamp):
@@ -131,7 +131,7 @@ calling them "Brocker".
 * get_items_since(self, start, count):
 
   Flushes pending updates, raising LockTimeout if not broker.stale_reads_ok.
- 
+
 * get_replication_info(self):
 
   Flushes pending updates, raising LockTimeout if not broker.stale_reads_ok.
@@ -190,7 +190,7 @@ calling them "Brocker".
 * merge_items(self, item_list, source=None):
 
 * merge_timestamps(self, created_at, put_timestamp, delete_timestamp):
- 
+
 * merge_syncs(self, sync_points, incoming=True):
 
 * @property metadata(self):
@@ -263,7 +263,7 @@ Class ``DiskFile`` provides an API to object server.
   | self.fp = open(self.data_file, 'rb')
   | self.iter_hook = iter_hook
   | self.name = '/' + '/'.join((account, container, obj))
-  | self.datadir = 
+  | self.datadir
   | self.device_path = os.path.join(path, device)
   | self.tmpdir = os.path.join(path, device, 'tmp')
   | self.logger = logger
@@ -297,9 +297,9 @@ Class ``DiskFile`` provides an API to object server.
 * _handle_close_quarantine(self):
 
 * app_iter_range(self, start, stop):
- 
+
 * app_iter_ranges(self, ranges, content_type, boundary, size):
- 
+
 * close(self, verify_file=True):
 
 * get_data_file_size(self):
