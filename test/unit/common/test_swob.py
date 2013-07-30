@@ -261,7 +261,10 @@ class TestAccept(unittest.TestCase):
 
     def test_accept_xml(self):
         for accept in ('application/xml', 'application/xml;q=1.0,*/*;q=0.9',
-                       '*/*;q=0.9,application/xml;q=1.0'):
+                       '*/*;q=0.9,application/xml;q=1.0',
+                       'application/xml;charset=UTF-8',
+                       'application/xml;charset=UTF-8;qws="quoted with space"',
+                       'application/xml; q=0.99 ; qws="quoted with space"'):
             acc = swift.common.swob.Accept(accept)
             match = acc.best_match(['text/plain', 'application/xml',
                                    'text/xml'])
@@ -270,7 +273,10 @@ class TestAccept(unittest.TestCase):
     def test_accept_invalid(self):
         for accept in ('*', 'text/plain,,', 'some stuff',
                        'application/xml;q=1.0;q=1.1', 'text/plain,*',
-                       'text /plain', 'text\x7f/plain'):
+                       'text /plain', 'text\x7f/plain',
+                       'text/plain;a=b=c',
+                       'text/plain;q=1;q=2',
+                       'text/plain; ubq="unbalanced " quotes"'):
             acc = swift.common.swob.Accept(accept)
             match = acc.best_match(['text/plain', 'application/xml',
                                    'text/xml'])
@@ -279,6 +285,7 @@ class TestAccept(unittest.TestCase):
     def test_repr(self):
         acc = swift.common.swob.Accept("application/json")
         self.assertEquals(repr(acc), "application/json")
+
 
 class TestRequest(unittest.TestCase):
     def test_blank(self):
@@ -519,7 +526,7 @@ class TestRequest(unittest.TestCase):
         req.query_string = u'x=\u2661'
         self.assertEquals(req.params['x'], u'\u2661'.encode('utf-8'))
 
-    def test_url(self):
+    def test_url2(self):
         pi = '/hi/there'
         path = pi
         req = swift.common.swob.Request.blank(path)
@@ -588,7 +595,7 @@ class TestRequest(unittest.TestCase):
 
         req.headers['Content-Length'] = 'abc'
         try:
-            l = req.message_length()
+            req.message_length()
         except ValueError as e:
             self.assertEquals(str(e), "Invalid Content-Length header value")
         else:
@@ -604,7 +611,7 @@ class TestRequest(unittest.TestCase):
 
         req.headers['Transfer-Encoding'] = 'gzip,chunked'
         try:
-            l = req.message_length()
+            req.message_length()
         except AttributeError as e:
             self.assertEquals(str(e), "Unsupported Transfer-Coding header"
                               " value specified in Transfer-Encoding header")
@@ -613,7 +620,7 @@ class TestRequest(unittest.TestCase):
 
         req.headers['Transfer-Encoding'] = 'gzip'
         try:
-            l = req.message_length()
+            req.message_length()
         except ValueError as e:
             self.assertEquals(str(e), "Invalid Transfer-Encoding header value")
         else:
@@ -621,7 +628,7 @@ class TestRequest(unittest.TestCase):
 
         req.headers['Transfer-Encoding'] = 'gzip,identity'
         try:
-            l = req.message_length()
+            req.message_length()
         except AttributeError as e:
             self.assertEquals(str(e), "Unsupported Transfer-Coding header"
                               " value specified in Transfer-Encoding header")

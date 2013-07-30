@@ -98,6 +98,7 @@ from urlparse import parse_qs
 
 from swift.proxy.controllers.base import get_account_info
 from swift.common.swob import HeaderKeyDict
+from swift.common.utils import split_path
 
 
 #: Default headers to remove from incoming requests. Simply a whitespace
@@ -121,6 +122,21 @@ DEFAULT_OUTGOING_REMOVE_HEADERS = 'x-object-meta-*'
 #: whitespace delimited list of header names and names can optionally end with
 #: '*' to indicate a prefix match.
 DEFAULT_OUTGOING_ALLOW_HEADERS = 'x-object-meta-public-*'
+
+
+def get_tempurl_keys_from_metadata(meta):
+    """
+    Extracts the tempurl keys from metadata.
+
+    :param meta: account metadata
+    :returns: list of keys found (possibly empty if no keys set)
+
+    Example:
+      meta = get_account_info(...)['meta']
+      keys = get_tempurl_keys_from_metadata(meta)
+    """
+    return [value for key, value in meta.iteritems()
+            if key.lower() in ('temp-url-key', 'temp-url-key-2')]
 
 
 class TempURL(object):
@@ -303,16 +319,13 @@ class TempURL(object):
         :param env: The WSGI environment for the request.
         :returns: Account str or None.
         """
-        account = None
         if env['REQUEST_METHOD'] in self.methods:
-            parts = env['PATH_INFO'].split('/', 4)
-            # Must be five parts, ['', 'v1', 'a', 'c', 'o'], must be a v1
-            # request, have account, container, and object values, and the
-            # object value can't just have '/'s.
-            if len(parts) == 5 and not parts[0] and parts[1] == 'v1' and \
-                    parts[2] and parts[3] and parts[4].strip('/'):
-                account = parts[2]
-        return account
+            try:
+                ver, acc, cont, obj = split_path(env['PATH_INFO'], 4, 4, True)
+            except ValueError:
+                return None
+            if ver == 'v1' and obj.strip('/'):
+                return acc
 
     def _get_temp_url_info(self, env):
         """
@@ -354,8 +367,7 @@ class TempURL(object):
                    X-Account-Meta-Temp-URL-Key-2 str value if set]
         """
         account_info = get_account_info(env, self.app, swift_source='TU')
-        return [value for key, value in account_info['meta'].iteritems()
-                if key.lower() in ('temp-url-key', 'temp-url-key-2')]
+        return get_tempurl_keys_from_metadata(account_info['meta'])
 
     def _get_hmacs(self, env, expires, keys, request_method=None):
         """
@@ -467,7 +479,7 @@ class TempURL(object):
 
 
 def filter_factory(global_conf, **local_conf):
-    """ Returns the WSGI filter for use with paste.deploy. """
+    """Returns the WSGI filter for use with paste.deploy."""
     conf = global_conf.copy()
     conf.update(local_conf)
     return lambda app: TempURL(app, conf)

@@ -53,7 +53,7 @@ from swift.proxy.controllers.base import get_account_info
 
 
 class AccountQuotaMiddleware(object):
-    """ Account quota middleware
+    """Account quota middleware
 
     See above for a full description.
 
@@ -73,6 +73,9 @@ class AccountQuotaMiddleware(object):
             return self.app
 
         new_quota = request.headers.get('X-Account-Meta-Quota-Bytes')
+        remove_quota = request.headers.get('X-Remove-Account-Meta-Quota-Bytes')
+        if remove_quota:
+            new_quota = 0    # X-Remove dominates if both are present
 
         if request.environ.get('reseller_request') is True:
             if new_quota and not new_quota.isdigit():

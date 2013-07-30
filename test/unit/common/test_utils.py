@@ -17,6 +17,7 @@
 
 from __future__ import with_statement
 from test.unit import temptree
+
 import ctypes
 import errno
 import eventlet
@@ -26,21 +27,26 @@ import random
 import re
 import socket
 import sys
+
 from textwrap import dedent
+
 import threading
 import time
 import unittest
+import fcntl
+import shutil
+
 from Queue import Queue, Empty
 from getpass import getuser
 from shutil import rmtree
 from StringIO import StringIO
 from functools import partial
-from tempfile import TemporaryFile, NamedTemporaryFile
+from tempfile import TemporaryFile, NamedTemporaryFile, mkdtemp
 
 from mock import MagicMock, patch
 
 from swift.common.exceptions import (Timeout, MessageTimeout,
-                                     ConnectionTimeout)
+                                     ConnectionTimeout, LockTimeout)
 from swift.common import utils
 from swift.common.swob import Response
 
@@ -334,7 +340,7 @@ class TestUtils(unittest.TestCase):
         lfo.tell()
 
     def test_parse_options(self):
-        # use mkstemp to get a file that is definitely on disk
+        # Get a file that is definitely on disk
         with NamedTemporaryFile() as f:
             conf_file = f.name
             conf, options = utils.parse_options(test_args=[conf_file])
@@ -413,9 +419,11 @@ class TestUtils(unittest.TestCase):
     def test_get_logger_sysloghandler_plumbing(self):
         orig_sysloghandler = utils.SysLogHandler
         syslog_handler_args = []
+
         def syslog_handler_catcher(*args, **kwargs):
             syslog_handler_args.append((args, kwargs))
             return orig_sysloghandler(*args, **kwargs)
+
         syslog_handler_catcher.LOG_LOCAL0 = orig_sysloghandler.LOG_LOCAL0
         syslog_handler_catcher.LOG_LOCAL3 = orig_sysloghandler.LOG_LOCAL3
 
@@ -1125,6 +1133,15 @@ log_name = %(yarr)s'''
         self.assertFalse(utils.streq_const_time('a', 'aaaaa'))
         self.assertFalse(utils.streq_const_time('ABC123', 'abc123'))
 
+    def test_quorum_size(self):
+        expected_sizes = {1: 1,
+                          2: 2,
+                          3: 2,
+                          4: 3,
+                          5: 3}
+        got_sizes = dict([(n, utils.quorum_size(n)) for n in expected_sizes])
+        self.assertEqual(expected_sizes, got_sizes)
+
     def test_rsync_ip_ipv4_localhost(self):
         self.assertEqual(utils.rsync_ip('127.0.0.1'), '127.0.0.1')
 
@@ -1324,6 +1341,174 @@ log_name = %(yarr)s'''
                 utils.tpool_reraise,
                 MagicMock(side_effect=BaseException('test3')))
 
+    def test_lock_file(self):
+        flags = os.O_CREAT | os.O_RDWR
+        with NamedTemporaryFile(delete=False) as nt:
+            nt.write("test string")
+            nt.flush()
+            nt.close()
+            with utils.lock_file(nt.name, unlink=False) as f:
+                self.assertEqual(f.read(), "test string")
+                # we have a lock, now let's try to get a newer one
+                fd = os.open(nt.name, flags)
+                self.assertRaises(IOError, fcntl.flock, fd,
+                                  fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            with utils.lock_file(nt.name, unlink=False, append=True) as f:
+                self.assertEqual(f.read(), "test string")
+                f.seek(0)
+                f.write("\nanother string")
+                f.flush()
+                f.seek(0)
+                self.assertEqual(f.read(), "test string\nanother string")
+
+                # we have a lock, now let's try to get a newer one
+                fd = os.open(nt.name, flags)
+                self.assertRaises(IOError, fcntl.flock, fd,
+                                  fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            with utils.lock_file(nt.name, timeout=3, unlink=False) as f:
+                try:
+                    with utils.lock_file(nt.name, timeout=1, unlink=False) as f:
+                        self.assertTrue(False, "Expected LockTimeout exception")
+                except LockTimeout:
+                    pass
+
+            with utils.lock_file(nt.name, unlink=True) as f:
+                self.assertEqual(f.read(), "test string\nanother string")
+                # we have a lock, now let's try to get a newer one
+                fd = os.open(nt.name, flags)
+                self.assertRaises(IOError, fcntl.flock, fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            self.assertRaises(OSError, os.remove, nt.name)
+
+    def test_ismount_path_does_not_exist(self):
+        tmpdir = mkdtemp()
+        try:
+            assert utils.ismount(os.path.join(tmpdir, 'bar')) is False
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_ismount_path_not_mount(self):
+        tmpdir = mkdtemp()
+        try:
+            assert utils.ismount(tmpdir) is False
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_ismount_path_error(self):
+
+        def _mock_os_lstat(path):
+            raise OSError(13, "foo")
+
+        tmpdir = mkdtemp()
+        try:
+            with patch("os.lstat", _mock_os_lstat):
+                try:
+                    utils.ismount(tmpdir)
+                except OSError:
+                    pass
+                else:
+                    self.fail("Expected OSError")
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_ismount_path_is_symlink(self):
+        tmpdir = mkdtemp()
+        try:
+            link = os.path.join(tmpdir, "tmp")
+            os.symlink("/tmp", link)
+            assert utils.ismount(link) is False
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_ismount_path_is_root(self):
+        assert utils.ismount('/') is True
+
+    def test_ismount_parent_path_error(self):
+
+        _os_lstat = os.lstat
+
+        def _mock_os_lstat(path):
+            if path.endswith(".."):
+                raise OSError(13, "foo")
+            else:
+                return _os_lstat(path)
+
+        tmpdir = mkdtemp()
+        try:
+            with patch("os.lstat", _mock_os_lstat):
+                try:
+                    utils.ismount(tmpdir)
+                except OSError:
+                    pass
+                else:
+                    self.fail("Expected OSError")
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_ismount_successes_dev(self):
+
+        _os_lstat = os.lstat
+
+        class MockStat(object):
+            def __init__(self, mode, dev, ino):
+                self.st_mode = mode
+                self.st_dev = dev
+                self.st_ino = ino
+
+        def _mock_os_lstat(path):
+            if path.endswith(".."):
+                parent = _os_lstat(path)
+                return MockStat(parent.st_mode, parent.st_dev + 1,
+                                parent.st_ino)
+            else:
+                return _os_lstat(path)
+
+        tmpdir = mkdtemp()
+        try:
+            with patch("os.lstat", _mock_os_lstat):
+                try:
+                    utils.ismount(tmpdir)
+                except OSError:
+                    self.fail("Unexpected exception")
+                else:
+                    pass
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_ismount_successes_ino(self):
+
+        _os_lstat = os.lstat
+
+        class MockStat(object):
+            def __init__(self, mode, dev, ino):
+                self.st_mode = mode
+                self.st_dev = dev
+                self.st_ino = ino
+
+        def _mock_os_lstat(path):
+            if path.endswith(".."):
+                return _os_lstat(path)
+            else:
+                parent_path = os.path.join(path, "..")
+                child = _os_lstat(path)
+                parent = _os_lstat(parent_path)
+                return MockStat(child.st_mode, parent.st_ino,
+                                child.st_dev)
+
+        tmpdir = mkdtemp()
+        try:
+            with patch("os.lstat", _mock_os_lstat):
+                try:
+                    utils.ismount(tmpdir)
+                except OSError:
+                    self.fail("Unexpected exception")
+                else:
+                    pass
+        finally:
+            shutil.rmtree(tmpdir)
+
 
 class TestFileLikeIter(unittest.TestCase):
 
@@ -1348,7 +1533,6 @@ class TestFileLikeIter(unittest.TestCase):
 
     def test_read(self):
         in_iter = ['abc', 'de', 'fghijk', 'l']
-        chunks = []
         iter_file = utils.FileLikeIter(in_iter)
         self.assertEquals(iter_file.read(), ''.join(in_iter))
 
@@ -1707,7 +1891,9 @@ class TestAffinityLocalityPredicate(unittest.TestCase):
         self.assertRaises(ValueError,
                           utils.affinity_locality_predicate, 'r1z1=1')
 
+
 class TestGreenthreadSafeIterator(unittest.TestCase):
+
     def increment(self, iterable):
         plus_ones = []
         for n in iterable:
@@ -1724,7 +1910,7 @@ class TestGreenthreadSafeIterator(unittest.TestCase):
             pile.spawn(self.increment, iterable)
 
         try:
-            response = sorted([resp for resp in pile])
+            sorted([resp for resp in pile])
             self.assertTrue(False, "test setup is insufficiently crazy")
         except ValueError:
             pass
@@ -1739,6 +1925,7 @@ class TestGreenthreadSafeIterator(unittest.TestCase):
 
 
 class TestStatsdLoggingDelegation(unittest.TestCase):
+
     def setUp(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(('localhost', 0))
@@ -1979,10 +2166,13 @@ class TestStatsdLoggingDelegation(unittest.TestCase):
 
     def test_no_fdatasync(self):
         called = []
+
         class NoFdatasync:
             pass
+
         def fsync(fd):
             called.append(fd)
+
         with patch('swift.common.utils.os', NoFdatasync()):
             with patch('swift.common.utils.fsync', fsync):
                 utils.fdatasync(12345)
@@ -1990,38 +2180,52 @@ class TestStatsdLoggingDelegation(unittest.TestCase):
 
     def test_yes_fdatasync(self):
         called = []
+
         class YesFdatasync:
+
             def fdatasync(self, fd):
                 called.append(fd)
+
         with patch('swift.common.utils.os', YesFdatasync()):
             utils.fdatasync(12345)
             self.assertEquals(called, [12345])
 
     def test_fsync_bad_fullsync(self):
+
         class FCNTL:
+
             F_FULLSYNC = 123
+
             def fcntl(self, fd, op):
                 raise IOError(18)
+
         with patch('swift.common.utils.fcntl', FCNTL()):
             self.assertRaises(OSError, lambda: utils.fsync(12345))
 
     def test_fsync_f_fullsync(self):
         called = []
+
         class FCNTL:
+
             F_FULLSYNC = 123
+
             def fcntl(self, fd, op):
                 called[:] = [fd, op]
                 return 0
+
         with patch('swift.common.utils.fcntl', FCNTL()):
             utils.fsync(12345)
             self.assertEquals(called, [12345, 123])
 
     def test_fsync_no_fullsync(self):
         called = []
+
         class FCNTL:
             pass
+
         def fsync(fd):
             called.append(fd)
+
         with patch('swift.common.utils.fcntl', FCNTL()):
             with patch('os.fsync', fsync):
                 utils.fsync(12345)

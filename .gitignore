@@ -1,8 +1,10 @@
 *.py[co]
 *.sw?
+*~
 doc/build/*
 dist
 build
+cover
 ChangeLog
 .coverage
 gluster_swift_ufo.egg-info
@@ -11,3 +13,4 @@ swift.egg-info
 .tox
 pycscope.*
 .idea
+MANIFEST

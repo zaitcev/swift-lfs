@@ -15,6 +15,7 @@
 
 from test import unit
 import unittest
+import mock
 import os
 import time
 from shutil import rmtree
@@ -22,8 +23,8 @@ from hashlib import md5
 from tempfile import mkdtemp
 from test.unit import FakeLogger
 from swift.obj import auditor
-from swift.obj import server as object_server
-from swift.obj.server import DiskFile, write_metadata, DATADIR
+from swift.obj.diskfile import DiskFile, write_metadata
+from swift.obj.server import DATADIR
 from swift.common.utils import hash_path, mkdirs, normalize_timestamp, \
     storage_directory
 from swift.obj.base import invalidate_hash
@@ -50,7 +51,8 @@ class TestAuditor(unittest.TestCase):
 
         self.conf = dict(
             devices=self.devices,
-            mount_check='false')
+            mount_check='false',
+            object_size_stats='10,100,1024,10240')
         self.disk_file = DiskFile(self.devices, 'sda', '0', 'a', 'c', 'o',
                                   self.logger)
 
@@ -140,14 +142,26 @@ class TestAuditor(unittest.TestCase):
             'sda', '0')
         self.assertEquals(self.auditor.quarantines, pre_quarantines + 1)
 
-    def test_object_audit_bad_args(self):
+    def test_generic_exception_handling(self):
         self.auditor = auditor.AuditorWorker(self.conf, self.logger)
+        timestamp = str(normalize_timestamp(time.time()))
         pre_errors = self.auditor.errors
-        self.auditor.object_audit(5, 'sda', '0')
+        data = '0' * 1024
+        etag = md5()
+        with self.disk_file.writer() as writer:
+            writer.write(data)
+            etag.update(data)
+            etag = etag.hexdigest()
+            metadata = {
+                'ETag': etag,
+                'X-Timestamp': timestamp,
+                'Content-Length': str(os.fstat(writer.fd).st_size),
+            }
+            writer.put(metadata)
+        with mock.patch('swift.obj.diskfile.DiskFile',
+                        lambda *_: 1 / 0):
+            self.auditor.audit_all_objects()
         self.assertEquals(self.auditor.errors, pre_errors + 1)
-        pre_errors = self.auditor.errors
-        self.auditor.object_audit('badpath', 'sda', '0')
-        self.assertEquals(self.auditor.errors, pre_errors)  # just returns
 
     def test_object_run_once_pass(self):
         self.auditor = auditor.AuditorWorker(self.conf, self.logger)
@@ -168,6 +182,8 @@ class TestAuditor(unittest.TestCase):
             writer.put(metadata)
         self.auditor.audit_all_objects()
         self.assertEquals(self.auditor.quarantines, pre_quarantines)
+        self.assertEquals(self.auditor.stats_buckets[1024], 1)
+        self.assertEquals(self.auditor.stats_buckets[10240], 0)
 
     def test_object_run_once_no_sda(self):
         self.auditor = auditor.AuditorWorker(self.conf, self.logger)
@@ -322,16 +338,16 @@ class TestAuditor(unittest.TestCase):
                 rat[0] = True
                 DiskFile.close(self, verify_file=verify_file)
         self.setup_bad_zero_byte()
-        was_df = object_server.DiskFile
+        was_df = auditor.diskfile.DiskFile
         try:
-            object_server.DiskFile = FakeFile
+            auditor.diskfile.DiskFile = FakeFile
             self.auditor.run_once(zero_byte_fps=50)
             quarantine_path = os.path.join(self.devices,
                                            'sda', 'quarantined', 'objects')
             self.assertTrue(os.path.isdir(quarantine_path))
             self.assertTrue(rat[0])
         finally:
-            object_server.DiskFile = was_df
+            auditor.diskfile.DiskFile = was_df
 
     def test_run_forever(self):
 

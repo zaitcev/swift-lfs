@@ -21,14 +21,13 @@ import sys
 import unittest
 import urlparse
 import signal
-from contextlib import contextmanager, nested
+from contextlib import contextmanager, nested, closing
 from gzip import GzipFile
 from shutil import rmtree
 import time
 from urllib import quote
 from hashlib import md5
 from tempfile import mkdtemp
-import random
 
 import mock
 from eventlet import sleep, spawn, wsgi, listen
@@ -61,6 +60,8 @@ logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
 
 STATIC_TIME = time.time()
 _request_instances = 0
+_test_coros = _test_servers = _test_sockets = _orig_container_listing_limit = \
+    _testdir = _orig_SysLogHandler = None
 
 
 def request_init(self, *args, **kwargs):
@@ -113,24 +114,30 @@ def setup():
     obj2lis = listen(('localhost', 0))
     _test_sockets = \
         (prolis, acc1lis, acc2lis, con1lis, con2lis, obj1lis, obj2lis)
-    pickle.dump(ring.RingData([[0, 1, 0, 1], [1, 0, 1, 0]],
-                [{'id': 0, 'zone': 0, 'device': 'sda1', 'ip': '127.0.0.1',
-                  'port': acc1lis.getsockname()[1]},
-                 {'id': 1, 'zone': 1, 'device': 'sdb1', 'ip': '127.0.0.1',
-                  'port': acc2lis.getsockname()[1]}], 30),
-                GzipFile(os.path.join(_testdir, 'account.ring.gz'), 'wb'))
-    pickle.dump(ring.RingData([[0, 1, 0, 1], [1, 0, 1, 0]],
-                [{'id': 0, 'zone': 0, 'device': 'sda1', 'ip': '127.0.0.1',
-                  'port': con1lis.getsockname()[1]},
-                 {'id': 1, 'zone': 1, 'device': 'sdb1', 'ip': '127.0.0.1',
-                  'port': con2lis.getsockname()[1]}], 30),
-                GzipFile(os.path.join(_testdir, 'container.ring.gz'), 'wb'))
-    pickle.dump(ring.RingData([[0, 1, 0, 1], [1, 0, 1, 0]],
-                [{'id': 0, 'zone': 0, 'device': 'sda1', 'ip': '127.0.0.1',
-                  'port': obj1lis.getsockname()[1]},
-                 {'id': 1, 'zone': 1, 'device': 'sdb1', 'ip': '127.0.0.1',
-                  'port': obj2lis.getsockname()[1]}], 30),
-                GzipFile(os.path.join(_testdir, 'object.ring.gz'), 'wb'))
+    with closing(GzipFile(os.path.join(_testdir, 'account.ring.gz'), 'wb')) \
+            as f:
+        pickle.dump(ring.RingData([[0, 1, 0, 1], [1, 0, 1, 0]],
+                    [{'id': 0, 'zone': 0, 'device': 'sda1', 'ip': '127.0.0.1',
+                      'port': acc1lis.getsockname()[1]},
+                     {'id': 1, 'zone': 1, 'device': 'sdb1', 'ip': '127.0.0.1',
+                      'port': acc2lis.getsockname()[1]}], 30),
+                    f)
+    with closing(GzipFile(os.path.join(_testdir, 'container.ring.gz'), 'wb')) \
+             as f:
+        pickle.dump(ring.RingData([[0, 1, 0, 1], [1, 0, 1, 0]],
+                    [{'id': 0, 'zone': 0, 'device': 'sda1', 'ip': '127.0.0.1',
+                      'port': con1lis.getsockname()[1]},
+                     {'id': 1, 'zone': 1, 'device': 'sdb1', 'ip': '127.0.0.1',
+                      'port': con2lis.getsockname()[1]}], 30),
+                    f)
+    with closing(GzipFile(os.path.join(_testdir, 'object.ring.gz'), 'wb')) \
+            as f:
+        pickle.dump(ring.RingData([[0, 1, 0, 1], [1, 0, 1, 0]],
+                    [{'id': 0, 'zone': 0, 'device': 'sda1', 'ip': '127.0.0.1',
+                      'port': obj1lis.getsockname()[1]},
+                     {'id': 1, 'zone': 1, 'device': 'sdb1', 'ip': '127.0.0.1',
+                      'port': obj2lis.getsockname()[1]}], 30),
+                    f)
     prosrv = proxy_server.Application(conf, FakeMemcacheReturnsNone())
     acc1srv = account_server.AccountController(conf)
     acc2srv = account_server.AccountController(conf)
@@ -542,7 +549,7 @@ class TestProxyServer(unittest.TestCase):
             req = Request.blank('/v1/a')
             req.environ['swift.authorize'] = authorize
             app.update_request(req)
-            resp = app.handle_request(req)
+            app.handle_request(req)
         self.assert_(called[0])
 
     def test_calls_authorize_deny(self):
@@ -558,7 +565,7 @@ class TestProxyServer(unittest.TestCase):
         req = Request.blank('/v1/a')
         req.environ['swift.authorize'] = authorize
         app.update_request(req)
-        resp = app.handle_request(req)
+        app.handle_request(req)
         self.assert_(called[0])
 
     def test_negative_content_length(self):
@@ -633,7 +640,7 @@ class TestProxyServer(unittest.TestCase):
 
         nodes = [{'region': 2, 'zone': 1, 'ip': '127.0.0.1'},
                  {'region': 1, 'zone': 2, 'ip': '127.0.0.2'}]
-        with mock.patch('swift.proxy.server.shuffle', lambda x:x):
+        with mock.patch('swift.proxy.server.shuffle', lambda x: x):
             app_sorted = baseapp.sort_nodes(nodes)
             exp_sorted = [{'region': 1, 'zone': 2, 'ip': '127.0.0.2'},
                           {'region': 2, 'zone': 1, 'ip': '127.0.0.1'}]
@@ -1036,7 +1043,7 @@ class TestObjectController(unittest.TestCase):
                                 headers={'X-If-Delete-At': 1},
                                 environ={'REQUEST_METHOD': 'DELETE'})
             self.app.update_request(req)
-            res = controller.DELETE(req)
+            controller.DELETE(req)
             self.assertEquals(test_errors, [])
 
     def test_GET_manifest_no_segments(self):
@@ -1621,10 +1628,10 @@ class TestObjectController(unittest.TestCase):
         try:
             with open(os.path.join(swift_dir, 'mime.types'), 'w') as fp:
                 fp.write('foo/bar foo\n')
-            ba = proxy_server.Application({'swift_dir': swift_dir},
-                                          FakeMemcache(), FakeLogger(),
-                                          FakeRing(), FakeRing(),
-                                          FakeRing())
+            proxy_server.Application({'swift_dir': swift_dir},
+                                     FakeMemcache(), FakeLogger(),
+                                     FakeRing(), FakeRing(),
+                                     FakeRing())
             self.assertEquals(proxy_server.mimetypes.guess_type('blah.foo')[0],
                               'foo/bar')
             self.assertEquals(proxy_server.mimetypes.guess_type('blah.jpg')[0],
@@ -4034,7 +4041,7 @@ class TestObjectController(unittest.TestCase):
             req = Request.blank('/a/c/o')
             req.environ['swift.authorize'] = authorize
             self.app.update_request(req)
-            res = controller.GET(req)
+            controller.GET(req)
         self.assert_(called[0])
 
     def test_HEAD_calls_authorize(self):
@@ -4050,7 +4057,7 @@ class TestObjectController(unittest.TestCase):
             req = Request.blank('/a/c/o', {'REQUEST_METHOD': 'HEAD'})
             req.environ['swift.authorize'] = authorize
             self.app.update_request(req)
-            res = controller.HEAD(req)
+            controller.HEAD(req)
         self.assert_(called[0])
 
     def test_POST_calls_authorize(self):
@@ -4068,7 +4075,7 @@ class TestObjectController(unittest.TestCase):
                                 headers={'Content-Length': '5'}, body='12345')
             req.environ['swift.authorize'] = authorize
             self.app.update_request(req)
-            res = controller.POST(req)
+            controller.POST(req)
         self.assert_(called[0])
 
     def test_POST_as_copy_calls_authorize(self):
@@ -4085,7 +4092,7 @@ class TestObjectController(unittest.TestCase):
                                 headers={'Content-Length': '5'}, body='12345')
             req.environ['swift.authorize'] = authorize
             self.app.update_request(req)
-            res = controller.POST(req)
+            controller.POST(req)
         self.assert_(called[0])
 
     def test_PUT_calls_authorize(self):
@@ -4102,7 +4109,7 @@ class TestObjectController(unittest.TestCase):
                                 headers={'Content-Length': '5'}, body='12345')
             req.environ['swift.authorize'] = authorize
             self.app.update_request(req)
-            res = controller.PUT(req)
+            controller.PUT(req)
         self.assert_(called[0])
 
     def test_COPY_calls_authorize(self):
@@ -4119,7 +4126,7 @@ class TestObjectController(unittest.TestCase):
                                 headers={'Destination': 'c/o'})
             req.environ['swift.authorize'] = authorize
             self.app.update_request(req)
-            res = controller.COPY(req)
+            controller.COPY(req)
         self.assert_(called[0])
 
     def test_POST_converts_delete_after_to_delete_at(self):
@@ -4519,9 +4526,9 @@ class TestObjectController(unittest.TestCase):
 
     def _gather_x_container_headers(self, controller_call, req, *connect_args,
                                     **kwargs):
-        header_list = kwargs.pop('header_list', ['X-Container-Partition',
+        header_list = kwargs.pop('header_list', ['X-Container-Device',
                                                  'X-Container-Host',
-                                                 'X-Container-Device'])
+                                                 'X-Container-Partition'])
         seen_headers = []
 
         def capture_headers(ipaddr, port, device, partition, method,
@@ -4542,7 +4549,7 @@ class TestObjectController(unittest.TestCase):
             # don't care about the account/container HEADs, so chuck
             # the first two requests
             return sorted(seen_headers[2:],
-                          key=lambda d: d.get(header_list[0]) or 'Z')
+                          key=lambda d: d.get(header_list[0]) or 'z')
 
     def test_PUT_x_container_headers_with_equal_replicas(self):
         req = Request.blank('/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
@@ -4637,15 +4644,16 @@ class TestObjectController(unittest.TestCase):
             200, 200, 200, 200, 200)   # HEAD HEAD DELETE DELETE DELETE
 
         self.assertEqual(seen_headers, [
-                {'X-Container-Host': '10.0.0.0:1000,10.0.0.3:1003',
-                 'X-Container-Partition': '1',
-                 'X-Container-Device': 'sda,sdd'},
-                {'X-Container-Host': '10.0.0.1:1001',
-                 'X-Container-Partition': '1',
-                 'X-Container-Device': 'sdb'},
-                {'X-Container-Host': '10.0.0.2:1002',
-                 'X-Container-Partition': '1',
-                 'X-Container-Device': 'sdc'}])
+            {'X-Container-Host': '10.0.0.0:1000,10.0.0.3:1003',
+             'X-Container-Partition': '1',
+             'X-Container-Device': 'sda,sdd'},
+            {'X-Container-Host': '10.0.0.1:1001',
+             'X-Container-Partition': '1',
+             'X-Container-Device': 'sdb'},
+            {'X-Container-Host': '10.0.0.2:1002',
+             'X-Container-Partition': '1',
+             'X-Container-Device': 'sdc'}
+        ])
 
     @mock.patch('time.time', new=lambda: STATIC_TIME)
     def test_PUT_x_delete_at_with_fewer_container_replicas(self):
@@ -4668,18 +4676,19 @@ class TestObjectController(unittest.TestCase):
                          'X-Delete-At-Partition', 'X-Delete-At-Container'))
 
         self.assertEqual(seen_headers, [
-                {'X-Delete-At-Host': '10.0.0.0:1000',
-                 'X-Delete-At-Container': delete_at_container,
-                 'X-Delete-At-Partition': '1',
-                 'X-Delete-At-Device': 'sda'},
-                {'X-Delete-At-Host': '10.0.0.1:1001',
-                 'X-Delete-At-Container': delete_at_container,
-                 'X-Delete-At-Partition': '1',
-                 'X-Delete-At-Device': 'sdb'},
-                {'X-Delete-At-Host': None,
-                 'X-Delete-At-Container': None,
-                 'X-Delete-At-Partition': None,
-                 'X-Delete-At-Device': None}])
+            {'X-Delete-At-Host': '10.0.0.0:1000',
+             'X-Delete-At-Container': delete_at_container,
+             'X-Delete-At-Partition': '1',
+             'X-Delete-At-Device': 'sda'},
+            {'X-Delete-At-Host': '10.0.0.1:1001',
+             'X-Delete-At-Container': delete_at_container,
+             'X-Delete-At-Partition': '1',
+             'X-Delete-At-Device': 'sdb'},
+            {'X-Delete-At-Host': None,
+             'X-Delete-At-Container': None,
+             'X-Delete-At-Partition': None,
+             'X-Delete-At-Device': None}
+        ])
 
     @mock.patch('time.time', new=lambda: STATIC_TIME)
     def test_PUT_x_delete_at_with_more_container_replicas(self):
@@ -4703,18 +4712,19 @@ class TestObjectController(unittest.TestCase):
             header_list=('X-Delete-At-Host', 'X-Delete-At-Device',
                          'X-Delete-At-Partition', 'X-Delete-At-Container'))
         self.assertEqual(seen_headers, [
-                {'X-Delete-At-Host': '10.0.0.0:1000,10.0.0.3:1003',
-                 'X-Delete-At-Container': delete_at_container,
-                 'X-Delete-At-Partition': '1',
-                 'X-Delete-At-Device': 'sda,sdd'},
-                {'X-Delete-At-Host': '10.0.0.1:1001',
-                 'X-Delete-At-Container': delete_at_container,
-                 'X-Delete-At-Partition': '1',
-                 'X-Delete-At-Device': 'sdb'},
-                {'X-Delete-At-Host': '10.0.0.2:1002',
-                 'X-Delete-At-Container': delete_at_container,
-                 'X-Delete-At-Partition': '1',
-                 'X-Delete-At-Device': 'sdc'}])
+            {'X-Delete-At-Host': '10.0.0.0:1000,10.0.0.3:1003',
+             'X-Delete-At-Container': delete_at_container,
+             'X-Delete-At-Partition': '1',
+             'X-Delete-At-Device': 'sda,sdd'},
+            {'X-Delete-At-Host': '10.0.0.1:1001',
+             'X-Delete-At-Container': delete_at_container,
+             'X-Delete-At-Partition': '1',
+             'X-Delete-At-Device': 'sdb'},
+            {'X-Delete-At-Host': '10.0.0.2:1002',
+             'X-Delete-At-Container': delete_at_container,
+             'X-Delete-At-Partition': '1',
+             'X-Delete-At-Device': 'sdc'}
+        ])
 
 
 class TestContainerController(unittest.TestCase):
@@ -5020,7 +5030,7 @@ class TestContainerController(unittest.TestCase):
                 if self.allow_lock:
                     yield True
                 else:
-                    raise MemcacheLockError()
+                    raise NotImplementedError
 
         with save_globals():
             controller = proxy_server.ContainerController(self.app, 'account',
@@ -5143,7 +5153,7 @@ class TestContainerController(unittest.TestCase):
                 req = Request.blank('/a/c', environ={'REQUEST_METHOD': method},
                                     headers={test_header: test_value})
                 self.app.update_request(req)
-                res = getattr(controller, method)(req)
+                getattr(controller, method)(req)
                 self.assertEquals(test_errors, [])
 
     def test_PUT_bad_metadata(self):
@@ -5250,7 +5260,7 @@ class TestContainerController(unittest.TestCase):
                                 headers={'X-Container-Read': '.r:*'})
             req.environ['swift.clean_acl'] = clean_acl
             self.app.update_request(req)
-            res = controller.POST(req)
+            controller.POST(req)
         self.assert_(called[0])
         called[0] = False
         with save_globals():
@@ -5261,7 +5271,7 @@ class TestContainerController(unittest.TestCase):
                                 headers={'X-Container-Write': '.r:*'})
             req.environ['swift.clean_acl'] = clean_acl
             self.app.update_request(req)
-            res = controller.POST(req)
+            controller.POST(req)
         self.assert_(called[0])
 
     def test_PUT_calls_clean_acl(self):
@@ -5278,7 +5288,7 @@ class TestContainerController(unittest.TestCase):
                                 headers={'X-Container-Read': '.r:*'})
             req.environ['swift.clean_acl'] = clean_acl
             self.app.update_request(req)
-            res = controller.PUT(req)
+            controller.PUT(req)
         self.assert_(called[0])
         called[0] = False
         with save_globals():
@@ -5289,7 +5299,7 @@ class TestContainerController(unittest.TestCase):
                                 headers={'X-Container-Write': '.r:*'})
             req.environ['swift.clean_acl'] = clean_acl
             self.app.update_request(req)
-            res = controller.PUT(req)
+            controller.PUT(req)
         self.assert_(called[0])
 
     def test_GET_no_content(self):
@@ -5334,7 +5344,7 @@ class TestContainerController(unittest.TestCase):
             req = Request.blank('/a/c', {'REQUEST_METHOD': 'HEAD'})
             req.environ['swift.authorize'] = authorize
             self.app.update_request(req)
-            res = controller.HEAD(req)
+            controller.HEAD(req)
         self.assert_(called[0])
 
     def test_OPTIONS(self):
@@ -5538,15 +5548,16 @@ class TestContainerController(unittest.TestCase):
             controller.PUT, req,
             200, 201, 201, 201)    # HEAD PUT PUT PUT
         self.assertEqual(seen_headers, [
-                {'X-Account-Host': '10.0.0.0:1000',
-                 'X-Account-Partition': '1',
-                 'X-Account-Device': 'sda'},
-                {'X-Account-Host': '10.0.0.1:1001',
-                 'X-Account-Partition': '1',
-                 'X-Account-Device': 'sdb'},
-                {'X-Account-Host': None,
-                 'X-Account-Partition': None,
-                 'X-Account-Device': None}])
+            {'X-Account-Host': '10.0.0.0:1000',
+             'X-Account-Partition': '1',
+             'X-Account-Device': 'sda'},
+            {'X-Account-Host': '10.0.0.1:1001',
+             'X-Account-Partition': '1',
+             'X-Account-Device': 'sdb'},
+            {'X-Account-Host': None,
+             'X-Account-Partition': None,
+             'X-Account-Device': None}
+        ])
 
     def test_PUT_x_account_headers_with_more_account_replicas(self):
         self.app.account_ring.set_replicas(4)
@@ -5557,15 +5568,16 @@ class TestContainerController(unittest.TestCase):
             controller.PUT, req,
             200, 201, 201, 201)    # HEAD PUT PUT PUT
         self.assertEqual(seen_headers, [
-                {'X-Account-Host': '10.0.0.0:1000,10.0.0.3:1003',
-                 'X-Account-Partition': '1',
-                 'X-Account-Device': 'sda,sdd'},
-                {'X-Account-Host': '10.0.0.1:1001',
-                 'X-Account-Partition': '1',
-                 'X-Account-Device': 'sdb'},
-                {'X-Account-Host': '10.0.0.2:1002',
-                 'X-Account-Partition': '1',
-                 'X-Account-Device': 'sdc'}])
+            {'X-Account-Host': '10.0.0.0:1000,10.0.0.3:1003',
+             'X-Account-Partition': '1',
+             'X-Account-Device': 'sda,sdd'},
+            {'X-Account-Host': '10.0.0.1:1001',
+             'X-Account-Partition': '1',
+             'X-Account-Device': 'sdb'},
+            {'X-Account-Host': '10.0.0.2:1002',
+             'X-Account-Partition': '1',
+             'X-Account-Device': 'sdc'}
+        ])
 
     def test_DELETE_x_account_headers_with_fewer_account_replicas(self):
         self.app.account_ring.set_replicas(2)
@@ -5576,15 +5588,16 @@ class TestContainerController(unittest.TestCase):
             controller.DELETE, req,
             200, 204, 204, 204)    # HEAD DELETE DELETE DELETE
         self.assertEqual(seen_headers, [
-                {'X-Account-Host': '10.0.0.0:1000',
-                 'X-Account-Partition': '1',
-                 'X-Account-Device': 'sda'},
-                {'X-Account-Host': '10.0.0.1:1001',
-                 'X-Account-Partition': '1',
-                 'X-Account-Device': 'sdb'},
-                {'X-Account-Host': None,
-                 'X-Account-Partition': None,
-                 'X-Account-Device': None}])
+            {'X-Account-Host': '10.0.0.0:1000',
+             'X-Account-Partition': '1',
+             'X-Account-Device': 'sda'},
+            {'X-Account-Host': '10.0.0.1:1001',
+             'X-Account-Partition': '1',
+             'X-Account-Device': 'sdb'},
+            {'X-Account-Host': None,
+             'X-Account-Partition': None,
+             'X-Account-Device': None}
+        ])
 
     def test_DELETE_x_account_headers_with_more_account_replicas(self):
         self.app.account_ring.set_replicas(4)
@@ -5595,15 +5608,16 @@ class TestContainerController(unittest.TestCase):
             controller.DELETE, req,
             200, 204, 204, 204)    # HEAD DELETE DELETE DELETE
         self.assertEqual(seen_headers, [
-                {'X-Account-Host': '10.0.0.0:1000,10.0.0.3:1003',
-                 'X-Account-Partition': '1',
-                 'X-Account-Device': 'sda,sdd'},
-                {'X-Account-Host': '10.0.0.1:1001',
-                 'X-Account-Partition': '1',
-                 'X-Account-Device': 'sdb'},
-                {'X-Account-Host': '10.0.0.2:1002',
-                 'X-Account-Partition': '1',
-                 'X-Account-Device': 'sdc'}])
+            {'X-Account-Host': '10.0.0.0:1000,10.0.0.3:1003',
+             'X-Account-Partition': '1',
+             'X-Account-Device': 'sda,sdd'},
+            {'X-Account-Host': '10.0.0.1:1001',
+             'X-Account-Partition': '1',
+             'X-Account-Device': 'sdb'},
+            {'X-Account-Host': '10.0.0.2:1002',
+             'X-Account-Partition': '1',
+             'X-Account-Device': 'sdc'}
+        ])
 
 
 class TestAccountController(unittest.TestCase):
@@ -5694,7 +5708,6 @@ class TestAccountController(unittest.TestCase):
 
             self.app.memcache = FakeMemcacheReturnsNone()
             self.assert_status_map(controller.GET, (404, 404, 404), 404, 404)
-
 
     def test_GET_autocreate(self):
         with save_globals():
@@ -5892,7 +5905,7 @@ class TestAccountController(unittest.TestCase):
                 req = Request.blank('/a/c', environ={'REQUEST_METHOD': method},
                                     headers={test_header: test_value})
                 self.app.update_request(req)
-                res = getattr(controller, method)(req)
+                getattr(controller, method)(req)
                 self.assertEquals(test_errors, [])
 
     def test_PUT_bad_metadata(self):

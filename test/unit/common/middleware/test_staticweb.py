@@ -18,7 +18,6 @@ try:
 except ImportError:
     import json
 import unittest
-from contextlib import contextmanager
 
 from swift.common.swob import Request, Response
 from swift.common.middleware import staticweb
@@ -54,6 +53,8 @@ meta_map = {
     'c11': {'meta': {'web-index': 'index.html'}},
     'c11a': {'meta': {'web-index': 'index.html',
              'web-directory-type': 'text/directory'}},
+    'c12': {'meta': {'web-index': 'index.html',
+                     'web-error': 'error.html'}},
 }
 
 
@@ -232,6 +233,12 @@ class FakeApp(object):
                             'not_a/directory'})(env, start_response)
         elif env['PATH_INFO'] == '/v1/a/c11a/subdir3/index.html':
             return Response(status='404 Not Found')(env, start_response)
+        elif env['PATH_INFO'] == '/v1/a/c12/index.html':
+            return Response(status='200 Ok', body='index file')(env,
+                                                                start_response)
+        elif env['PATH_INFO'] == '/v1/a/c12/200error.html':
+            return Response(status='200 Ok', body='error file')(env,
+                                                                start_response)
         else:
             raise Exception('Unknown path %r' % env['PATH_INFO'])
 
@@ -651,6 +658,12 @@ class TestStaticWeb(unittest.TestCase):
         resp = Request.blank('/v1/a/c11a/subdir3/').get_response(
                 self.test_staticweb)
         self.assertEquals(resp.status_int, 200)
+
+    def test_container12unredirectedrequest(self):
+        resp = Request.blank('/v1/a/c12/').get_response(
+                self.test_staticweb)
+        self.assertEquals(resp.status_int, 200)
+        self.assert_('index file' in resp.body)
 
     def test_subrequest_once_if_possible(self):
         resp = Request.blank(
