@@ -5,9 +5,11 @@ LFS: Existing API
 API definition and practices
 ----------------------------
 
+See :ref:`db` for the automatically generated documentation.
+
 The ``class AccountBroker`` and ``class ContainerBroker`` are very similar
 and inherit from the same class in the baseline implementation
-(swift.common.db.DatabaseBroker). So, we consider them together,
+(:class:`swift.common.db.DatabaseBroker`). So, we consider them together,
 calling them "Broker".
 
 * DatabaseBroker.__init__:
@@ -80,7 +82,7 @@ calling them "Broker".
 
 * can_delete_db(self, cutoff):
 
-  Present in AccountBroker only.
+  Present in AccountBroker only and appears completely unused.
 
 * create_object_table(self, conn):
 
@@ -706,6 +708,8 @@ LFS: Planned Changes
   This relieves the implementation from working around the checking done
   by the core Swift.
   https://review.openstack.org/35505
+
+* Eliminate can_delete_db.
 
 TBD:
 

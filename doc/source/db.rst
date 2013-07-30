@@ -10,9 +10,13 @@ DB
 ==
 
 .. automodule:: swift.common.db
+    :private-members:
     :members:
     :undoc-members:
     :show-inheritance:
+    :member-order:
+
+:func:`swift.common.db.DatabaseBroker.reclaim`
 
 .. _db-replicator:
 
