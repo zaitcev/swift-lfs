@@ -664,8 +664,10 @@ LFS: Planned Changes
 
 * Remove db_file from the API. Note that it is used for diagnostics a lot.
   There was some work done around the ".is_good() patch", but David Hadas
-  put a -1 on it, holding hostage for some unrelated thing. See
-  https://review.openstack.org/28009 and https://review.openstack.org/26646
+  put a -1 on it, holding hostage for some unrelated thing.
+
+  See review https://review.openstack.org/28009
+  and https://review.openstack.org/26646
 
 * The put_container is difficult to implement without a real database,
   because it has atomic lookup and update semantics. An implementation
@@ -673,10 +675,13 @@ LFS: Planned Changes
   the account stats, then add new stats. All that is resistant to crashes
   and hangs, using database transactions.
 
-* Remove or hide pending_timeout as implementation detail. TBD: How?
+* Remove or hide pending_timeout as implementation detail.
+
+  See review https://review.openstack.org/39588 (merged)
 
 * Move stale_reads_ok to argument or inside of _get_account_broker.
-  See review https://review.openstack.org/36919
+ 
+  See review https://review.openstack.org/36919 (merged)
 
 * Change tests or else rename get() to _get(), since it's an internal API.
 
@@ -703,13 +708,20 @@ LFS: Planned Changes
   |                                      account, container, obj,
   |                                      verify_existence=True)
 
+  See review https://review.openstack.org/40037
+
 * Move mount checking into _diskfile()
 
   This relieves the implementation from working around the checking done
   by the core Swift.
-  https://review.openstack.org/35505
+  See review https://review.openstack.org/35505
+
+* The mount check also exists in DB broker, needs hiding in the same way
+  as Peter did for DiskFile.
 
 * Eliminate can_delete_db.
+
+  See review https://review.openstack.org/39193 (merged)
 
 TBD:
 
@@ -724,3 +736,5 @@ TBD:
   and open() outside of DiskReader?
 * Peter's DiskFile.usage has _quarantined_dir with underscore, is this
   in already? What review number?
+* DB_PREALLOCATION must be fixed up
+  ``swift.common.db.DB_PREALLOCATION = ... conf.get('db_preallocation', 'f')``
