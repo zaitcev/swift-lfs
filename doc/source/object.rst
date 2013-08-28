@@ -14,6 +14,14 @@ Object Server
     :undoc-members:
     :show-inheritance:
 
+.. _disk_file:
+
+Object Server' back-end
+=======================
+
+.. automodule:: swift.obj.diskfile
+    :members:
+
 .. _object-replicator:
 
 Object Replicator

@@ -16,8 +16,6 @@ DB
     :show-inheritance:
     :member-order:
 
-:func:`swift.common.db.DatabaseBroker.reclaim`
-
 .. _db-replicator:
 
 DB replicator
